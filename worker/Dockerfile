@@ -24,7 +24,7 @@ WORKDIR /worker
 COPY package.json package-lock.json* ./
 
 # Install all dependencies for build with caching
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
@@ -58,7 +58,7 @@ ENV K6_BIN_PATH=/usr/local/bin/k6
 COPY --from=builder --chown=pwuser:pwuser /worker/package*.json ./
 
 # Install production dependencies with caching and memory limits
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --legacy-peer-deps --no-audit --no-fund --max-old-space-size=4096
 
 COPY --from=builder --chown=pwuser:pwuser /worker/dist ./dist
