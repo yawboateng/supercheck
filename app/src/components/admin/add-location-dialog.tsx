@@ -31,6 +31,10 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
   const [lon, setLon] = React.useState("");
   const [isDefault, setIsDefault] = React.useState(false);
   const [sortOrder, setSortOrder] = React.useState("0");
+  const reservedCodes = React.useMemo(
+    () => new Set(["global", "all", "default", "none", "any", "local"]),
+    []
+  );
 
   const resetForm = React.useCallback(() => {
     setCode("");
@@ -51,11 +55,20 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
       return;
     }
 
-    // Validate code format: 2-63 chars, lowercase alphanumeric + hyphens
-    if (code.length < 2 || !/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(code)) {
+    // Validate code format: 2-50 chars, lowercase alphanumeric + hyphens
+    if (
+      code.length < 2 ||
+      code.length > 50 ||
+      !/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(code) ||
+      code.includes("--")
+    ) {
       toast.error(
-        "Code must be lowercase letters, numbers, and hyphens (2-63 chars)"
+        "Code must be lowercase letters, numbers, and hyphens (2-50 chars)"
       );
+      return;
+    }
+    if (reservedCodes.has(code.trim())) {
+      toast.error("This code is reserved for system use");
       return;
     }
 
@@ -117,11 +130,11 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
                 onChange={(e) =>
                   setCode(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))
                 }
-                maxLength={63}
+                maxLength={50}
                 required
               />
               <p className="text-xs text-muted-foreground">
-                Immutable identifier. Lowercase letters, numbers, hyphens.
+                Immutable identifier. Lowercase letters, numbers, hyphens. 2-50 characters.
               </p>
             </div>
 

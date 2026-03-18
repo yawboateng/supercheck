@@ -177,6 +177,9 @@ export function LocationsTable() {
                     <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
                       {loc.code}
                     </code>
+                    {loc.code === "local" && (
+                      <span className="ml-1.5 text-[10px] text-muted-foreground">(self-hosted)</span>
+                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
                     {loc.region || "—"}
@@ -201,7 +204,8 @@ export function LocationsTable() {
                     <Switch
                       checked={loc.isEnabled}
                       onCheckedChange={() => handleToggleEnabled(loc)}
-                      disabled={updateLocation.isPending}
+                      disabled={updateLocation.isPending || loc.code === "local"}
+                      title={loc.code === "local" ? "The local location cannot be disabled. It is the system fallback." : undefined}
                     />
                   </TableCell>
                   <TableCell>
@@ -218,14 +222,18 @@ export function LocationsTable() {
                           <Pencil className="mr-2 h-3.5 w-3.5" />
                           Edit
                         </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          className="text-destructive focus:text-destructive"
-                          onClick={() => setDeleteTarget(loc)}
-                        >
-                          <Trash2 className="mr-2 h-3.5 w-3.5" />
-                          Delete
-                        </DropdownMenuItem>
+                        {loc.code !== "local" && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => setDeleteTarget(loc)}
+                            >
+                              <Trash2 className="mr-2 h-3.5 w-3.5" />
+                              Delete
+                            </DropdownMenuItem>
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </TableCell>

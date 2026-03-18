@@ -100,7 +100,7 @@ export class MonitorService {
 
   async executeMonitor(
     jobData: MonitorJobDataDto,
-    location: MonitoringLocation = "local",
+    location: MonitoringLocation = (process.env.WORKER_LOCATION?.toLowerCase() || 'local') as MonitoringLocation,
   ): Promise<MonitorExecutionResult | null> {
     // Removed log - only log warnings, errors, and status changes
 

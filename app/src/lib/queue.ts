@@ -122,6 +122,44 @@ export function monitorQueueName(locationCode: string): string {
   return `monitor-${locationCode}`;
 }
 
+/**
+ * Get the set of queue names that have active worker heartbeats.
+ * Delegates to worker-registry to avoid duplicating the Redis scan logic.
+ * Uses lazy import to avoid circular dependency at module-evaluation time.
+ */
+async function getActiveWorkerQueueNamesFromRegistry(): Promise<Set<string>> {
+  const { getActiveWorkerQueueNames } = await import("@/lib/worker-registry");
+  return getActiveWorkerQueueNames();
+}
+
+async function assertK6QueueAvailable(location: string): Promise<void> {
+  let activeQueueNames: Set<string>;
+  try {
+    activeQueueNames = await getActiveWorkerQueueNamesFromRegistry();
+  } catch {
+    // Redis heartbeat scan failed — allow the job to be enqueued anyway.
+    // BullMQ will hold it until a worker picks it up.
+    queueLogger.warn(
+      { location },
+      "[assertK6QueueAvailable] Heartbeat lookup failed — skipping active-worker check"
+    );
+    return;
+  }
+
+  const queueName = location === "global" ? K6_GLOBAL_QUEUE : k6QueueName(location);
+
+  if (!activeQueueNames.has(queueName)) {
+    // Log a warning but do NOT hard-fail. Worker heartbeat queue lists are
+    // refreshed on a 30s interval, so there is a brief window after a worker
+    // starts consuming a new queue before the heartbeat advertises it.
+    // Throwing here would reject valid K6 runs during that window.
+    queueLogger.warn(
+      { queueName, location, activeQueues: Array.from(activeQueueNames) },
+      "[assertK6QueueAvailable] No heartbeat found for queue — job will be enqueued but may wait for a worker"
+    );
+  }
+}
+
 // Redis capacity limit keys
 export const RUNNING_CAPACITY_LIMIT_KEY = "supercheck:capacity:running";
 export const QUEUE_CAPACITY_LIMIT_KEY = "supercheck:capacity:queued";
@@ -322,7 +360,22 @@ export async function getQueues(): Promise<{
         playwrightQueues["global"] = playwrightQueue;
 
         // K6 - Dynamic regional queues from DB + "global" for any-location routing
-        const locationCodes = await getAllEnabledLocationCodes();
+        // Gracefully handle DB unavailability during startup (e.g., Postgres not ready yet).
+        // Static queues (playwright, schedulers) still get created; dynamic location queues
+        // will be built later via invalidateQueueMaps() or on next getQueues() call.
+        let locationCodes: string[];
+        let locationFetchFailed = false;
+        try {
+          locationCodes = await getAllEnabledLocationCodes();
+        } catch (locationErr) {
+          queueLogger.warn(
+            { err: locationErr },
+            "[Queue Client] Failed to fetch location codes from DB — creating static queues only. " +
+            "Will schedule automatic retry to rebuild dynamic queues."
+          );
+          locationCodes = [];
+          locationFetchFailed = true;
+        }
         const k6Locations = [...locationCodes, "global"];
         for (const loc of k6Locations) {
           const queueName = k6QueueName(loc);
@@ -481,6 +534,54 @@ export async function getQueues(): Promise<{
 
           process.once("SIGINT", () => handleShutdown("SIGINT"));
           process.once("SIGTERM", () => handleShutdown("SIGTERM"));
+        }
+
+        // If location codes couldn't be fetched (DB unavailable at startup),
+        // schedule a deferred rebuild so dynamic queues are created once the DB comes up.
+        // Without this, initPromise stays resolved with empty location queues permanently.
+        if (locationFetchFailed) {
+          const DEFERRED_REBUILD_DELAY = 10_000; // 10 seconds
+          const MAX_REBUILD_ATTEMPTS = 5;
+          let rebuildAttempt = 0;
+
+          const scheduleRebuild = () => {
+            rebuildAttempt++;
+            const delay = DEFERRED_REBUILD_DELAY * Math.pow(2, rebuildAttempt - 1); // 10s, 20s, 40s, 80s, 160s
+            setTimeout(async () => {
+              try {
+                const codes = await getAllEnabledLocationCodes();
+                if (codes.length > 0) {
+                  queueLogger.info(
+                    { locations: codes },
+                    "[Queue Client] DB now available — rebuilding dynamic queues"
+                  );
+                  await invalidateQueueMaps();
+                } else if (rebuildAttempt < MAX_REBUILD_ATTEMPTS) {
+                  queueLogger.warn(
+                    {},
+                    `[Queue Client] DB available but no enabled locations found (attempt ${rebuildAttempt}/${MAX_REBUILD_ATTEMPTS})`
+                  );
+                  scheduleRebuild();
+                }
+              } catch {
+                if (rebuildAttempt < MAX_REBUILD_ATTEMPTS) {
+                  queueLogger.warn(
+                    {},
+                    `[Queue Client] Deferred queue rebuild failed (attempt ${rebuildAttempt}/${MAX_REBUILD_ATTEMPTS}), will retry`
+                  );
+                  scheduleRebuild();
+                } else {
+                  queueLogger.error(
+                    {},
+                    "[Queue Client] Deferred queue rebuild exhausted all attempts — dynamic queues remain empty. " +
+                    "A location CRUD operation or process restart will trigger a rebuild."
+                  );
+                }
+              }
+            }, delay);
+          };
+
+          scheduleRebuild();
         }
 
         // BullMQ Queues initialized
@@ -965,6 +1066,8 @@ export async function addK6TestToQueue(
   const k6TestLocation = task.location || await getFirstDefaultLocationCode();
 
   try {
+    await assertK6QueueAvailable(k6TestLocation);
+
     const { getCapacityManager } = await import("./capacity-manager");
     const capacityManager = await getCapacityManager();
 
@@ -1061,6 +1164,8 @@ export async function addK6JobToQueue(
   const k6JobLocation = task.location || await getFirstDefaultLocationCode();
 
   try {
+    await assertK6QueueAvailable(k6JobLocation);
+
     const { getCapacityManager } = await import("./capacity-manager");
     const capacityManager = await getCapacityManager();
 
@@ -1345,8 +1450,9 @@ export async function setQueueCapacityLimit(limit: number): Promise<void> {
 /**
  * Resolve effective monitor locations from DB, with multi-tier fallback.
  * Validates configured locations against enabled locations in the DB,
- * falling back to defaults → all enabled → "local" if none are valid.
+ * falling back to defaults → all enabled → first default location if none are valid.
  * When projectId is provided, further restricts to project-allowed locations.
+ * Note: "local" location is only available in self-hosted mode.
  *
  * Shared logic aligns with monitor-scheduler's getEffectiveLocations.
  */
@@ -1392,7 +1498,8 @@ async function resolveMonitorLocations(
 
 /**
  * Get default monitor locations with a safety fallback chain:
- * default locations → all enabled → "local"
+ * default locations → all enabled → first default location.
+ * Note: "local" is excluded in cloud-hosted mode via location-registry filtering.
  * When projectId is provided and the project has explicit restrictions,
  * filters the resolved defaults to only project-allowed codes.
  */
@@ -1444,29 +1551,47 @@ export async function addMonitorExecutionJobToQueue(
       (monitorConfig?.locationConfig as LocationConfig | null) ?? null;
     const effectiveLocations = await resolveMonitorLocations(locationConfig, task.projectId);
 
-    // Filter to locations that have active queues — fail if none match
-    const availableQueueLocations = Object.keys(monitorExecutionQueue);
-    const validLocations = effectiveLocations.filter((loc) =>
-      availableQueueLocations.includes(loc)
-    );
+    // Determine which locations have active queues — degrade gracefully
+    // when a subset of workers is offline rather than aborting entirely.
+    // This matches the scheduler's behavior in monitor-scheduler.ts.
+    const activeQueueNames = await getActiveWorkerQueueNamesFromRegistry();
 
-    if (validLocations.length === 0) {
-      const missing = effectiveLocations.join(", ");
-      const available = availableQueueLocations.join(", ") || "none";
+    const enqueuedLocations: string[] = [];
+    const skippedLocations: string[] = [];
+
+    for (const location of effectiveLocations) {
+      const monitorQueue = monitorExecutionQueue[location];
+      if (monitorQueue && activeQueueNames.has(monitorQueueName(location))) {
+        enqueuedLocations.push(location);
+      } else {
+        skippedLocations.push(location);
+      }
+    }
+
+    // Only fail when NO locations can accept jobs
+    if (enqueuedLocations.length === 0 && effectiveLocations.length > 0) {
+      const available = Object.keys(monitorExecutionQueue).join(", ") || "none";
       throw new Error(
-        `No monitor execution queues available for configured locations [${missing}]. ` +
+        `No active monitor workers available for any configured location(s) [${effectiveLocations.join(", ")}]. ` +
         `Available queues: [${available}]. ` +
         `Ensure workers are running in the required regions.`
       );
     }
-    const locationsToSchedule = validLocations;
+
+    if (skippedLocations.length > 0) {
+      queueLogger.warn(
+        { monitorId: task.monitorId, skippedLocations, enqueuedLocations },
+        `Monitor ${task.monitorId}: ${skippedLocations.length} location(s) skipped ` +
+        `due to missing/offline workers. Proceeding with ${enqueuedLocations.length} location(s).`
+      );
+    }
 
     const executionGroupId = `${task.monitorId}-${Date.now()}-${Buffer.from(
       crypto.randomBytes(6)
     ).toString("hex")}`;
 
     await Promise.all(
-      locationsToSchedule.map(async (location) => {
+      enqueuedLocations.map(async (location) => {
         const monitorQueue = monitorExecutionQueue[location];
 
         if (!monitorQueue) {
@@ -1483,7 +1608,7 @@ export async function addMonitorExecutionJobToQueue(
             ...task,
             executionLocation: location,
             executionGroupId,
-            expectedLocations: locationsToSchedule,
+            expectedLocations: enqueuedLocations,
           },
           {
             jobId: `${task.monitorId}:${executionGroupId}:${location}`,

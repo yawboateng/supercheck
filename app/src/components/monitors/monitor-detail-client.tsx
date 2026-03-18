@@ -499,7 +499,9 @@ export function MonitorDetailClient({
       effectiveLocationsFromConfig ??
       (locationsFromResults.length > 0
         ? locationsFromResults
-        : ["local"]);
+        : dynamicLocations.length > 0
+          ? [dynamicLocations[0].code]
+          : []);
 
     // Get latest result for each location
     const latestByLocation: Record<MonitoringLocation, boolean> = {} as Record<

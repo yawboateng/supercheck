@@ -75,7 +75,7 @@ async function getDefaultLocationsWithFallback(projectId?: string): Promise<stri
     if (enabled.length > 0) {
       resolved = enabled;
     } else {
-      // Ultimate fallback — getFirstDefaultLocationCode() always returns "local"
+      // Ultimate fallback — getFirstDefaultLocationCode() returns the first default or throws in cloud mode if none exist
       const fallback = await getFirstDefaultLocationCode();
       resolved = [fallback];
     }

@@ -8,17 +8,20 @@ Production-ready Docker Compose files for self-hosting Supercheck.
 git clone https://github.com/supercheck-io/supercheck.git
 cd supercheck/deploy/docker
 
-# Generate secrets and install gVisor automatically
+# Generate secrets
 sudo bash init-secrets.sh
+
+# Install local K3s + gVisor for the execution plane
+sudo bash setup-k3s.sh
 
 # Edit .env for optional integrations (SMTP, AI, OAuth)
 nano .env
 
-# Start (local testing)
-docker compose up -d
+# Start self-hosted stack with the same Kubernetes Job execution model used in cloud
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
 
 # Or start (production with HTTPS)
-docker compose -f docker-compose-secure.yml up -d
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-secure.yml up -d
 ```
 
 ## Prerequisites
@@ -31,8 +34,8 @@ docker compose version
 ```
 
 **Install Docker:**
-- **Mac/Windows**: [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- **Linux**: `curl -fsSL https://get.docker.com | sh`
+- **Linux (supported for self-hosted execution)**: `curl -fsSL https://get.docker.com | sh`
+- **macOS/Windows**: fine for evaluation only, but not the supported self-hosted execution target
 
 ---
 
@@ -40,9 +43,10 @@ docker compose version
 
 | File | Use Case |
 |------|----------|
-| `docker-compose.yml` | Local testing (HTTP, localhost:3000) |
-| `docker-compose-secure.yml` | Production (HTTPS with Let's Encrypt) |
-| `docker-compose-worker.yml` | Remote workers for multi-location |
+| `docker-compose.yml` | Self-hosted deployment with local K3s-backed execution (HTTP, localhost:3000) |
+| `docker-compose-secure.yml` | Production with HTTPS and local K3s-backed execution |
+| `docker-compose-worker.yml` | Remote regional worker with local K3s-backed execution |
+| `docker-compose-local.yml` | Source-based local development with the same K3s-backed execution model |
 
 ---
 
@@ -88,7 +92,9 @@ OAuth (`GITHUB_*` / `GOOGLE_*`) is optional in self-hosted mode.
 
 ```bash
 # Scale to 2 worker replicas (2 concurrent executions)
-WORKER_REPLICAS=2 RUNNING_CAPACITY=2 QUEUED_CAPACITY=20 docker compose up -d
+WORKER_REPLICAS=2 RUNNING_CAPACITY=2 QUEUED_CAPACITY=20 \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+docker compose up -d
 ```
 
 `RUNNING_CAPACITY` and `QUEUED_CAPACITY` are **App-side** settings. The App uses them to gate how many runs can be in `running` and `queued` states before submissions are throttled or rejected. Keep `RUNNING_CAPACITY` aligned with total worker replicas so the gate matches actual execution throughput.
@@ -99,27 +105,21 @@ For single-server deployments, keep `WORKER_LOCATION=local` so one worker proces
 
 ## gVisor Sandbox (Required)
 
-The worker containers run under [gVisor](https://gvisor.dev/) (`runtime: runsc`) for syscall-level isolation. All child processes (Playwright, k6, monitors) inherit the gVisor sandbox automatically — no Docker-in-Docker or socket mounting required.
+Production self-hosted deployments now use the same execution model as cloud: the worker always creates per-run Jobs in the local `supercheck-execution` namespace. Those Jobs use `runtimeClassName: gvisor`, so Playwright and k6 always execute under gVisor regardless of whether you are self-hosting or running in cloud Kubernetes.
 
-### Automatic Installation
+The Docker worker container still runs with `runtime: runsc`, but it is only the control plane. Untrusted code no longer executes inside the long-lived worker container in any supported Compose deployment.
 
-The `init-secrets.sh` script automatically installs gVisor during setup. If you run it with `sudo`, gVisor is installed without any extra steps:
+### Installation
 
-```bash
-sudo bash init-secrets.sh
-```
-
-If you ran `init-secrets.sh` without `sudo`, it will prompt for your password to install gVisor.
-
-### Manual Installation
-
-If auto-install fails (e.g., Docker Desktop on macOS/Windows), install manually:
+For production self-hosted installs, use the K3s bootstrap:
 
 ```bash
-sudo bash setup-gvisor.sh
+sudo bash setup-k3s.sh
 ```
 
-> **Docker Desktop note:** Docker Desktop runs containers inside a Linux VM. gVisor must be installed inside that VM. See [gVisor with Docker Desktop](https://dev.to/rimelek/using-gvisors-container-runtime-in-docker-desktop-374m) for instructions. For production, use Docker Engine on Linux where gVisor works natively.
+This installs K3s, installs gVisor, registers `runsc` for Docker Compose workers, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
+
+> **Linux host recommended:** self-hosted execution should use Docker Engine on Linux plus local K3s. Docker Desktop adds an extra VM layer and is not the supported production target.
 
 ---
 

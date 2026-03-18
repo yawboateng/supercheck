@@ -4,12 +4,40 @@
  * All location data flows from the `locations` DB table through this module.
  * In-memory cache avoids DB hits on every queue operation.
  * Cache is invalidated explicitly after CRUD and refreshed automatically after TTL.
+ *
+ * The "local" location is restricted to self-hosted deployments only.
+ * In cloud mode, "local" is filtered from all user-facing queries but
+ * remains in the DB as a fallback for self-hosted installations.
  */
 import { db } from "@/utils/db";
 import { locations, projectLocations } from "@/db/schema/locations";
 import { eq, and, asc, inArray } from "drizzle-orm";
+import { isSelfHosted } from "@/lib/feature-flags";
 
 export type Location = typeof locations.$inferSelect;
+
+/**
+ * The "local" location code. This location is only available in self-hosted mode.
+ * In cloud mode it is filtered from all user-facing queries (enabled locations,
+ * available locations, default location fallback) but remains in the DB so
+ * self-hosted installations continue to work out of the box.
+ */
+export const LOCAL_LOCATION_CODE = "local";
+
+/** Returns true when the "local" location should be excluded (i.e., cloud mode). */
+export function shouldExcludeLocal(): boolean {
+  return !isSelfHosted();
+}
+
+/** Filter out "local" from a location array when running in cloud mode. */
+function filterLocal<T extends { code: string }>(locs: T[]): T[] {
+  return shouldExcludeLocal() ? locs.filter((l) => l.code !== LOCAL_LOCATION_CODE) : locs;
+}
+
+/** Filter out "local" from a code array when running in cloud mode. */
+function filterLocalCodes(codes: string[]): string[] {
+  return shouldExcludeLocal() ? codes.filter((c) => c !== LOCAL_LOCATION_CODE) : codes;
+}
 
 interface ProjectLocationAvailability {
   locations: Location[];
@@ -37,16 +65,19 @@ async function ensureCache(): Promise<LocationCache> {
     .where(eq(locations.isEnabled, true))
     .orderBy(asc(locations.sortOrder), asc(locations.createdAt));
 
-  const enabledCodes = enabled.map((l) => l.code);
-  const defaultCodes = enabled.filter((l) => l.isDefault).map((l) => l.code);
+  // Apply cloud-mode filtering: exclude "local" in non-self-hosted deployments
+  const filtered = filterLocal(enabled);
+
+  const enabledCodes = filtered.map((l) => l.code);
+  const defaultCodes = filtered.filter((l) => l.isDefault).map((l) => l.code);
   const firstDefaultCode =
-    defaultCodes[0] || enabledCodes[0] || "local";
+    defaultCodes[0] || enabledCodes[0] || (isSelfHosted() ? LOCAL_LOCATION_CODE : "");
 
   cache = {
     enabledCodes,
     defaultCodes,
     firstDefaultCode,
-    allEnabled: enabled,
+    allEnabled: filtered,
     expiresAt: Date.now() + CACHE_TTL_MS,
   };
 
@@ -70,9 +101,20 @@ export async function getDefaultLocationCodes(): Promise<string[]> {
   return (await ensureCache()).defaultCodes;
 }
 
-/** Get the first default location code. Cached. */
+/**
+ * Get the first default location code. Cached.
+ *
+ * In self-hosted mode, ultimate fallback is "local".
+ * In cloud mode, throws if no enabled locations exist (no silent fallback to "local").
+ */
 export async function getFirstDefaultLocationCode(): Promise<string> {
-  return (await ensureCache()).firstDefaultCode;
+  const code = (await ensureCache()).firstDefaultCode;
+  if (!code) {
+    throw new Error(
+      "No enabled locations available. Create and enable at least one location in Super Admin."
+    );
+  }
+  return code;
 }
 
 /** Get all enabled locations (full objects). Cached. */
@@ -116,17 +158,23 @@ async function getProjectLocationAvailability(
   }
 
   const restrictedIds = restrictions.map((r) => r.locationId);
-  return {
-    locations: await db
-      .select()
-      .from(locations)
-      .where(
-        and(
-          eq(locations.isEnabled, true),
-          inArray(locations.id, restrictedIds)
-        )
+  const restricted = await db
+    .select()
+    .from(locations)
+    .where(
+      and(
+        eq(locations.isEnabled, true),
+        inArray(locations.id, restrictedIds)
       )
-      .orderBy(asc(locations.sortOrder), asc(locations.createdAt)),
+    )
+    .orderBy(asc(locations.sortOrder), asc(locations.createdAt));
+
+  // Apply cloud-mode filtering: exclude "local" from project-restricted
+  // queries too.  Without this, a project with an explicit project_locations
+  // row pointing at "local" would still surface and accept "local" via
+  // /api/locations/available and monitor/K6 validation in cloud mode.
+  return {
+    locations: filterLocal(restricted),
     hasRestrictions: true,
   };
 }
@@ -193,11 +241,15 @@ export async function getLocationByCode(
  * Normalize and validate a K6 location code against the DB.
  * Returns the validated code or falls back to the first default location.
  * "global" is always accepted (K6 queue routing treats it as any-worker).
+ * "local" is rejected in cloud mode (self-hosted only).
  */
 export async function normalizeK6Location(value?: string | null): Promise<string> {
   if (!value) return getFirstDefaultLocationCode();
   const lower = value.toLowerCase();
   if (lower === "global") return "global";
+  if (lower === LOCAL_LOCATION_CODE && shouldExcludeLocal()) {
+    return getFirstDefaultLocationCode();
+  }
   const valid = await validateLocationCode(lower);
   if (valid) return lower;
   return getFirstDefaultLocationCode();

@@ -37,14 +37,24 @@ export class LocationService {
 
   /**
    * Get the effective locations for a monitor (handles legacy and multi-location configs).
+   *
+   * When location config is disabled or absent, returns the worker's own location
+   * (from WORKER_LOCATION env var, defaulting to 'local'). This avoids hardcoding
+   * "local" which is not valid for cloud deployments.
    */
   getEffectiveLocations(config?: LocationConfig | null): string[] {
     if (!config || !config.enabled) {
-      // Single location mode - use default primary location
-      return ['local'];
+      // Use the worker's actual location instead of hardcoding 'local'
+      const workerLocation = process.env.WORKER_LOCATION?.toLowerCase() || 'local';
+      return [workerLocation];
     }
 
-    return config.locations || ['local'];
+    if (!config.locations || config.locations.length === 0) {
+      const workerLocation = process.env.WORKER_LOCATION?.toLowerCase() || 'local';
+      return [workerLocation];
+    }
+
+    return config.locations;
   }
 
   /**

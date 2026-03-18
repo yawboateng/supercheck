@@ -2,13 +2,60 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/admin";
 import { db } from "@/utils/db";
 import { locations } from "@/db/schema/locations";
-import { eq, ne, sql } from "drizzle-orm";
-import { invalidateLocationCache } from "@/lib/location-registry";
+import { eq, ne } from "drizzle-orm";
+import { invalidateLocationCache, LOCAL_LOCATION_CODE, shouldExcludeLocal } from "@/lib/location-registry";
 import { updateLocationSchema } from "@/lib/validations/location";
 import { getRedisConnection, invalidateQueueMaps, queueLogger } from "@/lib/queue";
 import { invalidateQueueEventHub } from "@/lib/queue-event-hub";
 
 type RouteParams = { params: Promise<{ id: string }> };
+
+async function countCapacityQueuedJobsForLocation(locationCode: string): Promise<number> {
+  const redis = await getRedisConnection();
+  let totalMatches = 0;
+  let cursor = "0";
+
+  do {
+    const [nextCursor, keys] = await redis.scan(
+      cursor,
+      "MATCH",
+      "capacity:queued:*",
+      "COUNT",
+      100
+    );
+    cursor = nextCursor;
+
+    for (const queuedKey of keys) {
+      const jobIds = await redis.zrange(queuedKey, 0, -1).catch(() => []);
+      if (jobIds.length === 0) continue;
+
+      const jobPayloads = await redis
+        .mget(jobIds.map((jobId) => `capacity:job:${jobId}`))
+        .catch(() => []);
+
+      for (const payload of jobPayloads) {
+        if (!payload) continue;
+        try {
+          const parsed: unknown = JSON.parse(payload);
+          if (
+            typeof parsed === 'object' &&
+            parsed !== null &&
+            'taskData' in parsed &&
+            typeof (parsed as Record<string, unknown>).taskData === 'object' &&
+            (parsed as Record<string, unknown>).taskData !== null &&
+            ((parsed as { taskData: Record<string, unknown> }).taskData).location === locationCode
+          ) {
+            totalMatches += 1;
+          }
+        } catch {
+          // Ignore malformed payloads
+        }
+      }
+    }
+  } while (cursor !== "0");
+
+  return totalMatches;
+}
 
 /**
  * PATCH /api/admin/locations/[id] — Update a location (Super Admin)
@@ -42,6 +89,18 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // Prevent disabling the "local" location — it is the system fallback for
+    // self-hosted installations and cannot be re-created via the API.
+    if (parsed.data.isEnabled === false && existing.code === "local") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'The "local" location cannot be disabled. It is the system fallback for self-hosted deployments.',
+        },
+        { status: 403 }
+      );
+    }
+
     // Use a transaction to prevent TOCTOU races on default enforcement and disable guard
     const updated = await db.transaction(async (tx) => {
       // Enforce single default: clear others before setting new default
@@ -52,13 +111,18 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           .where(ne(locations.id, id));
       }
 
-      // Block disabling the last enabled location
+      // Block disabling the last enabled location.
+      // In cloud mode, exclude the hidden "local" row from the count so it doesn't
+      // inflate the number of usable locations ("local" is invisible to all consumers).
       if (parsed.data.isEnabled === false && existing.isEnabled) {
-        const enabledCount = await tx
-          .select({ count: sql<number>`count(*)` })
+        const enabledRows = await tx
+          .select({ code: locations.code })
           .from(locations)
           .where(eq(locations.isEnabled, true));
-        if ((enabledCount[0]?.count ?? 0) <= 1) {
+        const visibleCount = shouldExcludeLocal()
+          ? enabledRows.filter((r) => r.code !== LOCAL_LOCATION_CODE).length
+          : enabledRows.length;
+        if (visibleCount <= 1) {
           throw new Error("CONFLICT:Cannot disable the last enabled location. At least one enabled location must exist.");
         }
       }
@@ -180,14 +244,32 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Use a transaction for atomic count check + delete to prevent TOCTOU race
+    const queuedCapacityJobs = await countCapacityQueuedJobsForLocation(existing.code);
+    if (queuedCapacityJobs > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Cannot delete location "${existing.code}": ${queuedCapacityJobs} queued capacity-managed K6 job(s) still target this location. Drain or cancel them first.`,
+        },
+        { status: 409 }
+      );
+    }
+
+    // Use a transaction for atomic count check + delete to prevent TOCTOU race.
+    // In cloud mode, exclude the hidden "local" row from the count so deleting
+    // the last *visible* region is correctly blocked.
     await db.transaction(async (tx) => {
-      const enabledCount = await tx
-        .select({ count: sql<number>`count(*)` })
-        .from(locations)
-        .where(eq(locations.isEnabled, true));
-      if ((enabledCount[0]?.count ?? 0) <= 1 && existing.isEnabled) {
-        throw new Error("CONFLICT:Cannot delete the last enabled location. At least one enabled location must exist.");
+      if (existing.isEnabled) {
+        const enabledRows = await tx
+          .select({ code: locations.code })
+          .from(locations)
+          .where(eq(locations.isEnabled, true));
+        const visibleCount = shouldExcludeLocal()
+          ? enabledRows.filter((r) => r.code !== LOCAL_LOCATION_CODE).length
+          : enabledRows.length;
+        if (visibleCount <= 1) {
+          throw new Error("CONFLICT:Cannot delete the last enabled location. At least one enabled location must exist.");
+        }
       }
 
       // Delete (project_locations cascade handled by ON DELETE CASCADE)

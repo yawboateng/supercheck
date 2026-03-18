@@ -1,17 +1,12 @@
 /**
  * Secure Script Execution Service
  *
- * Executes scripts as child processes inside the worker container.
- * gVisor (runsc) isolation is provided at the container runtime level:
+ * Production execution backend:
  *
- * - Docker Compose: `runtime: runsc` on the worker service
- * - Kubernetes: `runtimeClassName: gvisor` on the worker pod
- *
- * In both cases, ALL processes (including spawned children) inherit the
- * gVisor sandbox automatically. No dual-mode routing needed.
- *
- * The worker image already has Playwright + k6 installed, and concurrency
- * is 1-per-process, so scripts run sequentially with process-level isolation.
+ * - `kubernetes`: Used for both cloud and self-hosted Docker/K3s deployments.
+ *   Creates an ephemeral Job in the
+ *   `supercheck-execution` namespace so untrusted code is isolated away from the
+ *   long-lived worker control plane.
  */
 
 import {
@@ -22,7 +17,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
-import { spawn, ChildProcess } from 'child_process';
+import * as crypto from 'crypto';
+import * as path from 'path';
+import * as tar from 'tar';
+import type * as k8s from '@kubernetes/client-node';
+import { Readable, Writable } from 'stream';
+import { finished } from 'stream/promises';
 import { CancellationService } from '../services/cancellation.service';
 
 export interface ContainerExecutionOptions {
@@ -136,49 +136,47 @@ interface ValidatedLimits {
 @Injectable()
 export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ContainerExecutorService.name);
-
-  // -- Active processes for cleanup / cancellation --
-  private readonly runningProcesses: Map<string, ChildProcess> = new Map();
+  private static readonly WORKSPACE_ROOT = '/tmp/supercheck';
   private readonly activeCancellationIntervals: Set<NodeJS.Timeout> =
     new Set();
 
   /** Max combined stdout+stderr size in bytes (10 MB) */
   private static readonly MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
-  /** Grace period before SIGKILL after SIGTERM (ms) */
-  private static readonly SIGTERM_GRACE_MS = 5000;
+  /** Max artifact tar archive size in bytes (100 MB) */
+  private static readonly MAX_ARTIFACT_ARCHIVE_BYTES = 100 * 1024 * 1024;
 
   /** Allowed filename pattern: alphanumeric, dots, hyphens, underscores */
   private static readonly SAFE_FILENAME_RE = /^[\w.\-]+$/;
-
-  /** Environment variables allowed to pass to child processes */
-  private static readonly ENV_ALLOWLIST = new Set([
-    'PATH',
-    'HOME',
-    'USER',
-    'LANG',
-    'LC_ALL',
-    'TZ',
-    'NODE_ENV',
-    'NODE_OPTIONS',
-    'NODE_PATH',
-    'PLAYWRIGHT_BROWSERS_PATH',
-    'DISPLAY',
-    'XDG_RUNTIME_DIR',
-    'TMPDIR',
-    'TEMP',
-    'TMP',
-  ]);
+  private readonly defaultImage: string;
+  private readonly executionNamespace: string;
+  private k8sModule: typeof import('@kubernetes/client-node') | null = null;
+  private kubeConfig: k8s.KubeConfig | null = null;
+  private batchApi: k8s.BatchV1Api | null = null;
+  private coreApi: k8s.CoreV1Api | null = null;
+  private logClient: k8s.Log | null = null;
+  private execClient: k8s.Exec | null = null;
+  private readonly runningJobs: Map<string, string> = new Map();
 
   constructor(
     private configService: ConfigService,
     private cancellationService: CancellationService,
-  ) {}
+  ) {
+    this.defaultImage = this.configService.get<string>(
+      'WORKER_IMAGE',
+      'ghcr.io/supercheck-io/supercheck/worker:latest',
+    );
+    this.executionNamespace = this.configService.get<string>(
+      'EXECUTION_NAMESPACE',
+      'supercheck-execution',
+    );
+  }
 
   async onModuleInit(): Promise<void> {
-    this.logger.log(
-      'Container executor initialized (gVisor isolation provided by container runtime)',
-    );
+    await this.ensureKubernetesClients();
+    this.logger.log('Container executor initialized');
+    this.logger.log(`Execution namespace: ${this.executionNamespace}`);
+    this.logger.log(`Default execution image: ${this.defaultImage}`);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -188,12 +186,14 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     }
     this.activeCancellationIntervals.clear();
 
-    // Kill running child processes (entire process groups)
-    for (const [runId, proc] of this.runningProcesses.entries()) {
-      this.logger.warn(`Killing orphaned process for runId ${runId}`);
-      this.killProcessTree(proc, 'SIGKILL');
-    }
-    this.runningProcesses.clear();
+    const jobCleanup = Array.from(this.runningJobs.entries()).map(
+      async ([runId, jobName]) => {
+        this.logger.warn(`Deleting orphaned execution job ${jobName} for ${runId}`);
+        await this.deleteExecutionJob(jobName);
+      },
+    );
+    await Promise.allSettled(jobCleanup);
+    this.runningJobs.clear();
   }
 
   // =====================================================================
@@ -356,289 +356,737 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    return this.executeLocal(command, options, validatedLimits);
+    return this.executeInKubernetes(command, options, validatedLimits);
   }
 
-  // =====================================================================
-  //  EXECUTION — Direct child process
-  // =====================================================================
+  private async ensureKubernetesClients(): Promise<void> {
+    if (this.kubeConfig && this.batchApi && this.coreApi && this.logClient && this.execClient) {
+      return;
+    }
 
-  /**
-   * Executes a script as a direct child process (sh -c "...").
-   *
-   * Security model:
-   * - gVisor (runsc) sandboxing at the container runtime level
-   * - Process isolation via separate child process
-   * - Timeout enforcement via setTimeout + SIGKILL
-   * - Cancellation via Redis poll + SIGKILL
-   */
-  private async executeLocal(
+    const k8sModule =
+      this.k8sModule || (await import('@kubernetes/client-node'));
+    this.k8sModule = k8sModule;
+
+    const kubeConfig = new k8sModule.KubeConfig();
+    kubeConfig.loadFromDefault();
+
+    this.kubeConfig = kubeConfig;
+    this.batchApi = kubeConfig.makeApiClient(k8sModule.BatchV1Api);
+    this.coreApi = kubeConfig.makeApiClient(k8sModule.CoreV1Api);
+    this.logClient = new k8sModule.Log(kubeConfig);
+    this.execClient = new k8sModule.Exec(kubeConfig);
+  }
+
+  private async executeInKubernetes(
     command: string[],
     options: ContainerExecutionOptions,
     limits: ValidatedLimits,
   ): Promise<ContainerExecutionResult> {
     const startTime = Date.now();
-    const shellScript = this.buildShellScript(options, command);
-
-    this.logger.log(
-      `Executing (timeout: ${limits.timeoutMs}ms): ${command.join(' ')}`,
+    const workspace = this.buildWorkspacePath(options.runId);
+    const shellScript = this.buildShellScript(
+      { ...options, _workspace: workspace },
+      command,
     );
+    const jobName = this.buildExecutionJobName(options.runId);
+    const workingDir = options.workingDir || '/worker';
 
-    let childProcess: ChildProcess | null = null;
+    let podName: string | null = null;
+    let logAbort: AbortController | null = null;
     let cancellationInterval: NodeJS.Timeout | null = null;
     let killed = false;
     let timedOut = false;
+    let combinedLogs = '';
+    const logCollector = this.createLogCollector(options);
 
     try {
-      // Determine working directory — fall back to process.cwd() if the
-      // requested directory doesn't exist (e.g. /worker on a dev host).
-      const cwd = await this.resolveWorkerDir();
+      await this.ensureKubernetesClients();
 
-      // Build environment: allowlisted process env + caller-provided overrides.
-      // Only safe env vars are inherited to prevent leaking secrets
-      // (DATABASE_URL, S3_SECRET_KEY, etc.) to user-supplied scripts.
-      const childEnv: Record<string, string> = {};
-      for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && ContainerExecutorService.ENV_ALLOWLIST.has(k)) {
-          childEnv[k] = v;
-        }
+      const job = this.buildExecutionJob({
+        jobName,
+        workspace,
+        shellScript,
+        workingDir,
+        limits,
+        options,
+      });
+
+      await this.batchApi!.createNamespacedJob({
+        namespace: this.executionNamespace,
+        body: job,
+      });
+
+      if (options.runId) {
+        this.runningJobs.set(options.runId, jobName);
+        cancellationInterval = this.startKubernetesCancellationPoller(
+          options.runId,
+          jobName,
+          () => {
+            killed = true;
+          },
+        );
       }
-      if (options.env) {
-        for (const [k, v] of Object.entries(options.env)) {
-          if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k)) {
-            childEnv[k] = v;
-          }
-        }
+
+      podName = await this.waitForExecutionPod(jobName);
+
+      try {
+        logAbort = await this.logClient!.log(
+          this.executionNamespace,
+          podName,
+          'execution',
+          logCollector.stream,
+          {
+            follow: true,
+            timestamps: false,
+          },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Failed to start live log streaming for ${jobName}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
 
-      const result = await new Promise<ContainerExecutionResult>(
-        (resolve) => {
-          let stdout = '';
-          let stderr = '';
-
-          childProcess = spawn('/bin/sh', ['-c', shellScript], {
-            cwd,
-            env: childEnv,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            // Create a new process group so we can kill the entire tree
-            // (shell + npx + node + Chromium + k6) on timeout/cancel.
-            detached: true,
-          });
-
-          // Register for cancellation
-          if (options.runId && childProcess.pid) {
-            this.runningProcesses.set(options.runId, childProcess);
-          }
-
-          // Timeout enforcement — SIGTERM first, then SIGKILL after grace period.
-          // Uses process group kill to terminate the entire spawned tree.
-          const timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            if (childProcess && !childProcess.killed) {
-              this.killProcessTree(childProcess, 'SIGTERM');
-              setTimeout(() => {
-                if (childProcess && !childProcess.killed) {
-                  this.killProcessTree(childProcess, 'SIGKILL');
-                }
-              }, ContainerExecutorService.SIGTERM_GRACE_MS).unref();
-            }
-          }, limits.timeoutMs);
-
-          // Cancellation poller
-          if (options.runId) {
-            cancellationInterval = this.startCancellationPoller(
-              options.runId,
-              childProcess,
-              () => {
-                killed = true;
-              },
-            );
-          }
-
-          childProcess.stdout!.on('data', (chunk: Buffer) => {
-            const text = chunk.toString();
-            if (stdout.length < ContainerExecutorService.MAX_OUTPUT_BYTES) {
-              stdout += text;
-            }
-            if (options.onStdoutChunk) {
-              try {
-                void options.onStdoutChunk(text);
-              } catch {
-                /* ignore */
-              }
-            }
-          });
-          childProcess.stdout!.on('error', () => {});
-
-          childProcess.stderr!.on('data', (chunk: Buffer) => {
-            const text = chunk.toString();
-            if (stderr.length < ContainerExecutorService.MAX_OUTPUT_BYTES) {
-              stderr += text;
-            }
-            if (options.onStderrChunk) {
-              try {
-                void options.onStderrChunk(text);
-              } catch {
-                /* ignore */
-              }
-            }
-          });
-          childProcess.stderr!.on('error', () => {});
-
-          childProcess.on('close', (code) => {
-            clearTimeout(timeoutHandle);
-            const duration = Date.now() - startTime;
-            const exitCode = code ?? (timedOut ? 124 : killed ? 137 : 1);
-
-            resolve({
-              success: exitCode === 0 && !timedOut && !killed,
-              exitCode,
-              stdout,
-              stderr,
-              duration,
-              timedOut,
-              error: timedOut
-                ? `Execution timed out after ${limits.timeoutMs}ms`
-                : killed
-                  ? 'Execution cancelled (exit code 137)'
-                  : exitCode !== 0
-                    ? `Process exited with code ${exitCode}`
-                    : undefined,
-            });
-          });
-
-          childProcess.on('error', (err) => {
-            clearTimeout(timeoutHandle);
-            const duration = Date.now() - startTime;
-            resolve({
-              success: false,
-              exitCode: 1,
-              stdout,
-              stderr: err.message,
-              duration,
-              timedOut: false,
-              error: err.message,
-            });
-          });
-        },
+      const outcome = await this.waitForExecutionOutcome(
+        podName,
+        workspace,
+        limits.timeoutMs,
       );
+      timedOut = outcome.timedOut;
+      killed = killed || outcome.cancelled;
 
-      // Handle artifact extraction (same local filesystem).
-      // Always attempt extraction — failed Playwright runs (exit 1) and k6
-      // threshold breaches (exit 99) still produce artifacts needed for
-      // report parsing (results.json, HTML reports, traces, screenshots).
-      if (options.extractFromContainer && options.extractToHost) {
+      if (options.extractFromContainer && options.extractToHost && !timedOut && !killed) {
+        const extractSource = this.rewriteTmpPath(options.extractFromContainer, workspace);
         try {
-          await this.copyLocalArtifacts(
-            options.extractFromContainer,
-            options.extractToHost,
-          );
+          await this.extractPodArtifacts(podName, extractSource, options.extractToHost, workspace);
         } catch (extractError) {
           this.logger.error(
-            `Failed to copy artifacts: ${extractError instanceof Error ? extractError.message : String(extractError)}`,
+            `Failed to extract pod artifacts: ${
+              extractError instanceof Error ? extractError.message : String(extractError)
+            }`,
           );
         }
       }
 
-      const logResult = result.success ? 'succeeded' : 'failed';
-      this.logger.log(
-        `Execution ${logResult}: exitCode=${result.exitCode}, timedOut=${result.timedOut}, duration=${result.duration}ms`,
-      );
+      if (logAbort) {
+        logAbort.abort();
+      }
 
-      return result;
+      combinedLogs = logCollector.getOutput();
+      const finalLogs = await this.fetchPodLogsSnapshot(podName).catch(
+        () => combinedLogs,
+      );
+      if (finalLogs.length >= combinedLogs.length) {
+        combinedLogs = finalLogs;
+      }
+
+      const duration = Date.now() - startTime;
+      const exitCode =
+        outcome.exitCode ??
+        (timedOut ? 124 : killed ? 137 : 1);
+
+      return {
+        success: exitCode === 0 && !timedOut && !killed,
+        exitCode,
+        stdout: combinedLogs,
+        stderr: '',
+        duration,
+        timedOut,
+        error: timedOut
+          ? `Execution timed out after ${limits.timeoutMs}ms`
+          : killed
+            ? 'Execution cancelled (exit code 137)'
+            : exitCode !== 0
+              ? outcome.message || `Process exited with code ${exitCode}`
+              : undefined,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        exitCode: 1,
+        stdout: logCollector.getOutput(),
+        stderr: error instanceof Error ? error.message : String(error),
+        duration: Date.now() - startTime,
+        timedOut,
+        error: error instanceof Error ? error.message : String(error),
+      };
     } finally {
-      // Cleanup
+      if (logAbort) {
+        logAbort.abort();
+      }
       if (cancellationInterval) {
         clearInterval(cancellationInterval);
         this.activeCancellationIntervals.delete(cancellationInterval);
       }
       if (options.runId) {
-        this.runningProcesses.delete(options.runId);
+        this.runningJobs.delete(options.runId);
       }
+      await this.deleteExecutionJob(jobName);
     }
   }
 
-  /**
-   * Kills an entire process tree by signalling the process group.
-   * Falls back to direct kill if the group kill fails (e.g. PID already gone).
-   */
-  private killProcessTree(
-    childProcess: ChildProcess,
-    signal: NodeJS.Signals,
-  ): void {
-    try {
-      if (childProcess.pid) {
-        // Negative PID sends the signal to every process in the group
-        // (requires `detached: true` in spawn options).
-        process.kill(-childProcess.pid, signal);
-      } else {
-        childProcess.kill(signal);
+  private buildExecutionJob(params: {
+    jobName: string;
+    workspace: string;
+    shellScript: string;
+    workingDir: string;
+    limits: ValidatedLimits;
+    options: ContainerExecutionOptions;
+  }): k8s.V1Job {
+    const { jobName, workspace, shellScript, workingDir, limits, options } = params;
+    const image = options.image || this.defaultImage;
+    const envVars = this.buildKubernetesEnv(options.env, workspace);
+    const deadlineSeconds = Math.ceil((limits.timeoutMs + 120_000) / 1000);
+    const resourceCpuLimit = `${Math.max(100, Math.round(limits.cpuLimit * 1000))}m`;
+    const resourceCpuRequest = `${Math.max(100, Math.round(limits.cpuLimit * 500))}m`;
+    const resourceMemoryLimit = `${limits.memoryLimitMb}Mi`;
+    const resourceMemoryRequest = `${Math.max(128, Math.round(limits.memoryLimitMb * 0.75))}Mi`;
+    const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
+    const wrappedScript = this.buildKubernetesWrapperScript(shellScript, exitCodeFile);
+    const runLabel = this.buildLabelValue(options.runId);
+
+    return {
+      apiVersion: 'batch/v1',
+      kind: 'Job',
+      metadata: {
+        name: jobName,
+        namespace: this.executionNamespace,
+        labels: {
+          'app.kubernetes.io/managed-by': 'supercheck-worker',
+          'app.kubernetes.io/component': 'execution',
+          'supercheck.io/run-id': runLabel,
+        },
+      },
+      spec: {
+        ttlSecondsAfterFinished: 600,
+        backoffLimit: 0,
+        activeDeadlineSeconds: deadlineSeconds,
+        template: {
+          metadata: {
+            labels: {
+              'app.kubernetes.io/managed-by': 'supercheck-worker',
+              'app.kubernetes.io/component': 'execution',
+              'supercheck.io/run-id': runLabel,
+            },
+          },
+          spec: {
+            runtimeClassName: 'gvisor',
+            restartPolicy: 'Never',
+            automountServiceAccountToken: false,
+            enableServiceLinks: false,
+            nodeSelector: {
+              workload: 'worker',
+            },
+            tolerations: [
+              {
+                key: 'workload',
+                operator: 'Equal',
+                value: 'worker',
+                effect: 'NoSchedule',
+              },
+            ],
+            securityContext: {
+              runAsNonRoot: true,
+              runAsUser: 1000,
+              runAsGroup: 1000,
+              fsGroup: 1000,
+              seccompProfile: { type: 'RuntimeDefault' },
+            },
+            containers: [
+              {
+                name: 'execution',
+                image,
+                imagePullPolicy: 'IfNotPresent',
+                command: ['/bin/sh', '-c', wrappedScript],
+                workingDir,
+                env: envVars,
+                resources: {
+                  requests: {
+                    cpu: resourceCpuRequest,
+                    memory: resourceMemoryRequest,
+                  },
+                  limits: {
+                    cpu: resourceCpuLimit,
+                    memory: resourceMemoryLimit,
+                  },
+                },
+                securityContext: {
+                  runAsNonRoot: true,
+                  runAsUser: 1000,
+                  allowPrivilegeEscalation: false,
+                  readOnlyRootFilesystem: true,
+                  capabilities: {
+                    drop: ['ALL'],
+                  },
+                  seccompProfile: {
+                    type: 'RuntimeDefault',
+                  },
+                },
+                volumeMounts: [
+                  {
+                    name: 'tmp',
+                    mountPath: '/tmp',
+                  },
+                  {
+                    name: 'dshm',
+                    mountPath: '/dev/shm',
+                  },
+                ],
+              },
+            ],
+            volumes: [
+              {
+                name: 'tmp',
+                emptyDir: {},
+              },
+              {
+                name: 'dshm',
+                emptyDir: {
+                  medium: 'Memory',
+                  sizeLimit: '512Mi',
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  private buildKubernetesWrapperScript(
+    shellScript: string,
+    exitCodeFile: string,
+  ): string {
+    const escapedExitCodeFile = this.escapeShellArg(exitCodeFile);
+    return [
+      `(${shellScript})`,
+      'EXIT_CODE=$?',
+      `printf '%s' "$EXIT_CODE" > ${escapedExitCodeFile}`,
+      "trap 'exit 0' TERM INT",
+      'while true; do sleep 5; done',
+    ].join('; ');
+  }
+
+  private buildKubernetesEnv(
+    env: Record<string, string> | undefined,
+    workspace: string,
+  ): k8s.V1EnvVar[] {
+    const merged = new Map<string, string>([
+      ['HOME', `${workspace}/home`],
+      ['npm_config_cache', `${workspace}/.npm`],
+      ['NPM_CONFIG_CACHE', `${workspace}/.npm`],
+      ['TMPDIR', workspace],
+      ['TEMP', workspace],
+      ['TMP', workspace],
+    ]);
+
+    if (env) {
+      for (const [name, value] of Object.entries(env)) {
+        if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+          merged.set(name, this.rewriteTmpPath(value, workspace));
+        }
       }
-    } catch {
-      // ESRCH — process already exited; safe to ignore.
+    }
+
+    return Array.from(merged.entries()).map(([name, value]) => ({
+      name,
+      value,
+    }));
+  }
+
+  private buildExecutionJobName(runId?: string): string {
+    const suffix = crypto
+      .createHash('sha256')
+      .update(runId || crypto.randomUUID())
+      .digest('hex')
+      .slice(0, 20);
+    return `sc-exec-${suffix}`;
+  }
+
+  private buildLabelValue(value?: string): string {
+    const normalized = (value || crypto.randomUUID())
+      .toLowerCase()
+      .replace(/[^a-z0-9.-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!normalized) {
+      return 'unknown';
+    }
+    return normalized.slice(0, 63);
+  }
+
+  private async waitForExecutionPod(jobName: string): Promise<string> {
+    const timeoutAt = Date.now() + 120_000;
+    const labelSelector = `job-name=${jobName}`;
+
+    while (Date.now() < timeoutAt) {
+      const pods = await this.coreApi!.listNamespacedPod({
+        namespace: this.executionNamespace,
+        labelSelector,
+      });
+      const pod = pods.items[0];
+      if (pod?.metadata?.name) {
+        return pod.metadata.name;
+      }
+      await this.sleep(1000);
+    }
+
+    throw new Error(`Execution pod for job ${jobName} did not appear within 120s`);
+  }
+
+  private createLogCollector(options: ContainerExecutionOptions): {
+    stream: Writable;
+    getOutput: () => string;
+  } {
+    let output = '';
+    const stream = new Writable({
+      write: (chunk, _encoding, callback) => {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        if (output.length < ContainerExecutorService.MAX_OUTPUT_BYTES) {
+          output += text;
+        }
+        if (options.onStdoutChunk) {
+          try {
+            void options.onStdoutChunk(text);
+          } catch {
+            /* ignore log callback failures */
+          }
+        }
+        callback();
+      },
+    });
+
+    return {
+      stream,
+      getOutput: () => output,
+    };
+  }
+
+  private async fetchPodLogsSnapshot(podName: string): Promise<string> {
+    const chunks: Buffer[] = [];
+    const sink = new Writable({
+      write: (chunk, _encoding, callback) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    await this.logClient!.log(
+      this.executionNamespace,
+      podName,
+      'execution',
+      sink,
+      { follow: false, timestamps: false },
+    );
+    await finished(sink);
+
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
+  private async waitForExecutionOutcome(
+    podName: string,
+    workspace: string,
+    timeoutMs: number,
+  ): Promise<{ exitCode: number; timedOut: boolean; cancelled: boolean; message?: string }> {
+    const timeoutAt = Date.now() + timeoutMs;
+    const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
+
+    while (Date.now() < timeoutAt) {
+      const exitCode = await this.readExecutionExitCode(podName, exitCodeFile);
+      if (exitCode !== null) {
+        return {
+          exitCode,
+          timedOut: false,
+          cancelled: false,
+        };
+      }
+
+      let pod;
       try {
-        childProcess.kill(signal);
-      } catch {
-        // Already gone.
+        pod = await this.coreApi!.readNamespacedPod({
+          name: podName,
+          namespace: this.executionNamespace,
+        });
+      } catch (podError) {
+        const msg = podError instanceof Error ? podError.message : String(podError);
+        if (msg.includes('404') || msg.includes('NotFound') || msg.includes('not found')) {
+          // Pod was deleted externally — most likely by the cancellation poller.
+          // Treat as a user-initiated cancellation so processors record it correctly
+          // instead of returning a generic exitCode=1 failure.
+          this.logger.warn(
+            `Pod ${podName} no longer exists — treating as cancellation`,
+          );
+          return {
+            exitCode: 137,
+            timedOut: false,
+            cancelled: true,
+            message: 'Pod deleted during execution (cancelled)',
+          };
+        }
+        throw podError;
       }
+
+      const terminated = pod.status?.containerStatuses
+        ?.find((container) => container.name === 'execution')
+        ?.state?.terminated;
+      if (terminated) {
+        const timedOut =
+          terminated.reason === 'DeadlineExceeded' ||
+          terminated.message?.includes('DeadlineExceeded') === true;
+        return {
+          exitCode: terminated.exitCode ?? (timedOut ? 124 : 1),
+          timedOut,
+          cancelled: terminated.exitCode === 137,
+          message: terminated.message || terminated.reason,
+        };
+      }
+
+      await this.sleep(1000);
     }
+
+    return {
+      exitCode: 124,
+      timedOut: true,
+      cancelled: false,
+      message: `Execution timed out after ${timeoutMs}ms`,
+    };
   }
 
-  /**
-   * Copies artifacts between directories on the local filesystem.
-   */
-  private async copyLocalArtifacts(
+  private async readExecutionExitCode(
+    podName: string,
+    exitCodeFile: string,
+  ): Promise<number | null> {
+    const command = [
+      '/bin/sh',
+      '-c',
+      `if [ -f ${this.escapeShellArg(exitCodeFile)} ]; then cat ${this.escapeShellArg(exitCodeFile)}; fi`,
+    ];
+    const stdout = await this.execInPod(podName, command).catch((err) => {
+      this.logger.debug(
+        `Exit code read failed for ${podName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return '';
+    });
+    const trimmed = stdout.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const exitCode = Number.parseInt(trimmed, 10);
+    return Number.isFinite(exitCode) ? exitCode : null;
+  }
+
+  private async execInPod(podName: string, command: string[]): Promise<string> {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const stdout = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+    const stderr = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    const socket = await this.execClient!.exec(
+      this.executionNamespace,
+      podName,
+      'execution',
+      command,
+      stdout,
+      stderr,
+      null,
+      false,
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      socket.on('close', () => resolve());
+      socket.on('error', (error) => reject(error));
+    });
+
+    const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+    if (stderrText) {
+      this.logger.debug(`exec stderr from ${podName}: ${stderrText}`);
+    }
+
+    return Buffer.concat(stdoutChunks).toString('utf8');
+  }
+
+  private async extractPodArtifacts(
+    podName: string,
     sourcePath: string,
     destPath: string,
+    workspaceRoot: string,
   ): Promise<void> {
-    // Strip trailing '/.' if present (legacy convention)
     const cleanSource = sourcePath.replace(/\/\.$/g, '');
+    if (!this.isPathWithinBase(cleanSource, workspaceRoot)) {
+      throw new Error(`Refusing to extract artifacts outside workspace: ${cleanSource}`);
+    }
 
-    try {
-      await fs.access(cleanSource);
-    } catch {
-      this.logger.debug(
-        `Source path ${cleanSource} does not exist — skipping artifact copy`,
-      );
+    const archive = await this.capturePodTarStream(podName, cleanSource);
+    if (archive.length === 0) {
+      this.logger.debug(`No artifacts found at ${cleanSource} in ${podName}`);
       return;
     }
 
     await fs.mkdir(destPath, { recursive: true });
-    await fs.cp(cleanSource, destPath, { recursive: true });
-    this.logger.debug(`Copied artifacts from ${cleanSource} to ${destPath}`);
+    await this.validateTarArchive(archive);
+    const extractor = tar.x({
+      cwd: destPath,
+      preservePaths: false,
+      strict: true,
+      filter: (entryPath, entry) => {
+        this.validateTarEntry(entryPath, entry);
+        return true;
+      },
+    });
+    await finished(Readable.from(archive).pipe(extractor));
   }
 
-  /**
-   * Starts a cancellation poller for a child process.
-   * Checks Redis every 1s and sends SIGTERM then SIGKILL if cancelled.
-   */
-  private startCancellationPoller(
+  private async capturePodTarStream(
+    podName: string,
+    sourcePath: string,
+  ): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const stdout = new Writable({
+      write: (chunk, _encoding, callback) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += buffer.length;
+        if (totalBytes > ContainerExecutorService.MAX_ARTIFACT_ARCHIVE_BYTES) {
+          callback(
+            new Error(
+              `Artifact archive exceeded ${ContainerExecutorService.MAX_ARTIFACT_ARCHIVE_BYTES} bytes`,
+            ),
+          );
+          return;
+        }
+        chunks.push(buffer);
+        callback();
+      },
+    });
+    const stderrChunks: Buffer[] = [];
+    const stderr = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    const command = [
+      '/bin/sh',
+      '-c',
+      `if [ -e ${this.escapeShellArg(sourcePath)} ]; then tar cf - -C ${this.escapeShellArg(sourcePath)} .; fi`,
+    ];
+    const socket = await this.execClient!.exec(
+      this.executionNamespace,
+      podName,
+      'execution',
+      command,
+      stdout,
+      stderr,
+      null,
+      false,
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      socket.on('close', () => resolve());
+      socket.on('error', (error) => reject(error));
+    });
+
+    const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+    if (stderrText) {
+      throw new Error(`tar extraction failed: ${stderrText}`);
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  private async validateTarArchive(archive: Buffer): Promise<void> {
+    const parser = tar.t({
+      onReadEntry: (entry) => {
+        this.validateTarEntry(entry.path, entry);
+        entry.resume();
+      },
+    });
+    await finished(Readable.from(archive).pipe(parser));
+  }
+
+  private validateTarEntry(
+    entryPath: string,
+    entry: unknown,
+  ): void {
+    const normalized = entryPath.replace(/\\/g, '/');
+    if (
+      path.posix.isAbsolute(normalized) ||
+      normalized.split('/').includes('..')
+    ) {
+      throw new Error(`Unsafe path in artifact archive: ${entryPath}`);
+    }
+
+    const disallowedTypes = new Set([
+      'SymbolicLink',
+      'Link',
+      'CharacterDevice',
+      'BlockDevice',
+      'FIFO',
+      'ContiguousFile',
+    ]);
+    const entryType =
+      entry && typeof entry === 'object' && 'type' in entry
+        ? (entry as { type?: string }).type
+        : undefined;
+    if (entryType && disallowedTypes.has(entryType)) {
+      throw new Error(`Unsupported artifact entry type: ${entryType}`);
+    }
+  }
+
+  private getWorkspaceExitCodeFile(workspace: string): string {
+    return `${workspace}/.supercheck-exit-code`;
+  }
+
+  private rewriteTmpPath(value: string, workspace: string): string {
+    if (value.startsWith('/tmp/')) {
+      return `${workspace}/${value.slice(5)}`;
+    }
+    if (value === '/tmp' || value === '/tmp/') {
+      return workspace;
+    }
+    return value;
+  }
+
+  private escapeShellArg(value: string): string {
+    return `'${value.replace(/'/g, "'\\''")}'`;
+  }
+
+  private startKubernetesCancellationPoller(
     runId: string,
-    childProcess: ChildProcess,
+    jobName: string,
     onCancelled: () => void,
   ): NodeJS.Timeout {
     const interval = setInterval(() => {
       void (async () => {
         try {
-          const isCancelled =
-            await this.cancellationService.isCancelled(runId);
-          if (isCancelled) {
-            this.logger.warn(
-              `[${runId}] Cancellation detected — terminating process`,
-            );
-            onCancelled();
-            if (!childProcess.killed) {
-              this.killProcessTree(childProcess, 'SIGTERM');
-              setTimeout(() => {
-                if (!childProcess.killed) {
-                  this.killProcessTree(childProcess, 'SIGKILL');
-                }
-              }, ContainerExecutorService.SIGTERM_GRACE_MS).unref();
-            }
-            await this.cancellationService.clearCancellationSignal(runId);
-            clearInterval(interval);
-            this.activeCancellationIntervals.delete(interval);
+          const isCancelled = await this.cancellationService.isCancelled(runId);
+          if (!isCancelled) {
+            return;
           }
+
+          this.logger.warn(
+            `[${runId}] Cancellation detected — deleting execution job ${jobName}`,
+          );
+          onCancelled();
+          await this.deleteExecutionJob(jobName);
+          await this.cancellationService.clearCancellationSignal(runId);
+          clearInterval(interval);
+          this.activeCancellationIntervals.delete(interval);
         } catch (error) {
           this.logger.error(
             `Cancellation check error: ${error instanceof Error ? error.message : String(error)}`,
@@ -649,6 +1097,55 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
 
     this.activeCancellationIntervals.add(interval);
     return interval;
+  }
+
+  private async deleteExecutionJob(jobName: string): Promise<void> {
+    if (!jobName) {
+      return;
+    }
+
+    try {
+      await this.ensureKubernetesClients();
+      await this.batchApi!.deleteNamespacedJob({
+        name: jobName,
+        namespace: this.executionNamespace,
+        gracePeriodSeconds: 0,
+        propagationPolicy: 'Background',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !message.includes('404') &&
+        !message.includes('NotFound') &&
+        !message.includes('not found')
+      ) {
+        this.logger.warn(`Failed to delete execution job ${jobName}: ${message}`);
+      }
+    }
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private buildWorkspacePath(runId?: string): string {
+    const rawToken = runId || crypto.randomUUID();
+    const safeToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex')
+      .slice(0, 24);
+    return `${ContainerExecutorService.WORKSPACE_ROOT}/run-${safeToken}`;
+  }
+
+  private isPathWithinBase(candidatePath: string, basePath: string): boolean {
+    const relativePath = candidatePath.startsWith(basePath)
+      ? candidatePath.slice(basePath.length)
+      : null;
+    return (
+      relativePath !== null &&
+      (relativePath.length === 0 || relativePath.startsWith('/'))
+    );
   }
 
   // =====================================================================
@@ -662,10 +1159,16 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
    * node_modules, then executes the command.
    */
   buildShellScript(
-    options: ContainerExecutionOptions,
+    options: ContainerExecutionOptions & { _workspace?: string },
     command: string[],
   ): string {
     const shellCommands: string[] = [];
+
+    // Per-run workspace: isolates each execution to prevent cross-tenant
+    // file contamination (GVISOR-002). Production always uses a dedicated
+    // hashed workspace under /tmp/supercheck.
+    const ws = options._workspace || this.buildWorkspacePath(options.runId);
+    shellCommands.push(`mkdir -p '${ws.replace(/'/g, "'\\''")}'`);
 
     // Ensure required directories exist before writing files
     if (options.ensureDirectories && options.ensureDirectories.length > 0) {
@@ -674,15 +1177,22 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         if (!dir || typeof dir !== 'string') {
           continue;
         }
-        const escapedDir = dir.replace(/'/g, "'\\''");
+        // Relocate /tmp-rooted paths into the isolated workspace
+        const resolvedDir = dir.startsWith('/tmp/')
+          ? `${ws}/${dir.slice(5)}`
+          : dir === '/tmp'
+            ? ws
+            : dir;
+        const escapedDir = resolvedDir.replace(/'/g, "'\\''");
         shellCommands.push(`mkdir -p '${escapedDir}'`);
       }
     }
 
-    // Symlink node_modules so specs can resolve dependencies
-    // Uses $PWD (set by spawn cwd) to work in both Docker (/worker) and local dev
+    // Symlink node_modules into workspace so specs can resolve dependencies.
+    // Each run gets its own symlink — no shared /tmp/node_modules.
+    const wsEscaped = ws.replace(/'/g, "'\\''");
     shellCommands.push(
-      '[ -d "$PWD/node_modules" ] && [ ! -e /tmp/node_modules ] && ln -s "$PWD/node_modules" /tmp/node_modules || true',
+      `[ -d "$PWD/node_modules" ] && [ ! -e '${wsEscaped}/node_modules' ] && ln -s "$PWD/node_modules" '${wsEscaped}/node_modules' || true`,
     );
 
     // Write main script file via base64 decode
@@ -690,7 +1200,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     const scriptContent = Buffer.from(options.inlineScriptContent!).toString(
       'base64',
     );
-    const scriptPath = `/tmp/${options.inlineScriptFileName}`;
+    const scriptPath = `${ws}/${options.inlineScriptFileName}`;
     const escapedScriptPath = scriptPath.replace(/'/g, "'\\''");
     shellCommands.push(
       `printf '%s' "${scriptContent}" | base64 -d > '${escapedScriptPath}'`,
@@ -704,18 +1214,33 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         options.additionalFiles,
       )) {
         const encodedContent = Buffer.from(content).toString('base64');
-        const targetPath = `/tmp/${filePath}`;
+        const targetPath = `${ws}/${filePath}`;
         const escapedTarget = targetPath.replace(/'/g, "'\\''");
+        // Ensure parent directory exists for nested files
+        const parentDir = targetPath.substring(0, targetPath.lastIndexOf('/'));
+        if (parentDir && parentDir !== ws) {
+          shellCommands.push(`mkdir -p '${parentDir.replace(/'/g, "'\\''")}'`);
+        }
         shellCommands.push(
           `printf '%s' "${encodedContent}" | base64 -d > '${escapedTarget}'`,
         );
       }
     }
 
-    // Build the execution command with proper quoting
-    const adjustedCommand = command.map((arg) =>
-      arg === options.inlineScriptFileName ? scriptPath : arg,
-    );
+    // Build the execution command with proper quoting.
+    // Replace both the bare filename and /tmp/<filename> references with the
+    // workspace-scoped path so callers that pass /tmp/ paths still work.
+    const adjustedCommand = command.map((arg) => {
+      if (arg === options.inlineScriptFileName) return scriptPath;
+      // Rewrite /tmp/ prefixed paths to the per-run workspace
+      if (arg.startsWith('/tmp/') && options._workspace) {
+        return `${ws}/${arg.slice(5)}`;
+      }
+      if (arg === '/tmp/' && options._workspace) {
+        return `${ws}/`;
+      }
+      return arg;
+    });
     const quotedCommand = adjustedCommand
       .map((arg) => {
         if (/[\s|&;<>()$`"'\\]/.test(arg)) {

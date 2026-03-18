@@ -71,7 +71,7 @@ The examples below use the built-in `us-east`, `eu-central`, and `asia-pacific` 
 
 | `WORKER_LOCATION` | Queues Processed | Use Case |
 |-------------------|-----------------|----------|
-| `local` | **All queues** (regional + global) | Local development, single-server |
+| `local` | **All queues** (regional + global) | Local development, single-server (self-hosted only) |
 | `us-east` | `playwright-global`, `k6-us-east`, `k6-global`, `monitor-us-east` | US East regional worker |
 | `eu-central` | `playwright-global`, `k6-eu-central`, `k6-global`, `monitor-eu-central` | EU Central regional worker |
 | `asia-pacific` | `playwright-global`, `k6-asia-pacific`, `k6-global`, `monitor-asia-pacific` | Asia Pacific regional worker |
@@ -91,13 +91,15 @@ Locations are managed through the **Super Admin** panel.
 1. Navigate to **Super Admin → Locations** tab.
 2. Click **Add Location**.
 3. Fill in the required fields:
-   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Must be lowercase, 2–63 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`) are blocked.
+   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Must be lowercase, 2–50 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`, `local`) are blocked.
    - **Name** — Human-readable display name (e.g. "US East").
    - **Region** — Optional description (e.g. "Ashburn, Virginia").
    - **Flag** — Optional emoji flag for the UI (e.g. 🇺🇸).
    - **Coordinates** — Optional latitude/longitude for the map visualization.
 4. Toggle **Default** if this should be the default location for K6 job executions. Only one location can be default at a time — setting a new default automatically clears the previous one.
 5. Toggle **Enabled** to activate the location. Disabling a location removes its queues.
+
+All enabled locations are shown in user-facing location pickers, each with an online/offline indicator based on worker heartbeats. If a region is enabled in Super Admin but no worker is currently advertising `k6-{code}` / `monitor-{code}`, it appears with an offline badge — but it is **not removed** from the configuration. This prevents transient worker outages from silently stripping regions from monitor configs. When a monitor or K6 job runs, only locations with an active worker receive jobs; offline locations are skipped gracefully. The run only fails if **no** configured location has an active worker.
 
 ### Location Table Columns
 
@@ -148,7 +150,8 @@ For true geographic distribution, deploy workers in each region.
 
     Restart:
     ```bash
-    docker compose down && docker compose up -d
+    docker compose down && \
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
     ```
   </Step>
 
@@ -230,10 +233,13 @@ For true geographic distribution, deploy workers in each region.
       </Tab>
     </Tabs>
 
-    **2. Install gVisor (required):**
+    **2. Install local K3s + gVisor (required for production):**
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-gvisor.sh | sudo bash
+    curl -fsSL -o setup-k3s.sh https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-k3s.sh
+    sudo bash setup-k3s.sh
     ```
+
+    This writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig`. The remote worker container mounts that file and uses the same Kubernetes Job + gVisor execution path as cloud deployments.
 
     **3. Download Worker Compose:**
     ```bash
@@ -276,7 +282,7 @@ For true geographic distribution, deploy workers in each region.
 
     **5. Start Worker:**
     ```bash
-    docker compose -f docker-compose-worker.yml up -d
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-worker.yml up -d
     docker compose -f docker-compose-worker.yml logs -f  # Verify connection
     ```
   </Step>
@@ -339,10 +345,14 @@ AWS_SECRET_ACCESS_KEY=YOUR_MINIO_SECRET_KEY
 
 ```bash
 # Main server: total of 3 workers across all servers (1 + 1 + 1)
-RUNNING_CAPACITY=3 QUEUED_CAPACITY=30 docker compose up -d
+RUNNING_CAPACITY=3 QUEUED_CAPACITY=30 \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+docker compose up -d
 
 # Remote worker server: scale replicas on that server only
-WORKER_REPLICAS=1 docker compose -f docker-compose-worker.yml up -d
+WORKER_REPLICAS=1 \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+docker compose -f docker-compose-worker.yml up -d
 ```
 
 | Server | Role | Setting |

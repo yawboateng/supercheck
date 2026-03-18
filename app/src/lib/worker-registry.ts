@@ -70,6 +70,21 @@ export async function getActiveWorkers(): Promise<ActiveWorker[]> {
   return workers;
 }
 
+export async function getActiveWorkerQueueNames(): Promise<Set<string>> {
+  const workers = await getActiveWorkers();
+  const queueNames = new Set<string>();
+
+  for (const worker of workers) {
+    for (const queueName of worker.queues || []) {
+      if (queueName) {
+        queueNames.add(queueName);
+      }
+    }
+  }
+
+  return queueNames;
+}
+
 /**
  * Aggregate worker count by location code.
  */

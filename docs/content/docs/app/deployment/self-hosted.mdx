@@ -4,7 +4,7 @@ description: Docker Compose deployment on a single server
 icon: Container
 ---
 
-Deploy Supercheck on your own infrastructure with Docker Compose. All data stays on your servers.
+Deploy Supercheck on your own infrastructure. Production self-hosting uses Docker Compose for the app stack and local K3s + gVisor for the execution plane, so self-hosted and cloud deployments share the same per-run execution model.
 
 <Callout type="info">
 For true multi-location monitoring, see [Multi-Location Workers](/docs/app/deployment/multi-location).
@@ -24,9 +24,13 @@ Choose your deployment type:
 
 <Tabs items={['Local Testing', 'Production (HTTPS)']}>
   <Tab value="Local Testing">
-    Best for local development, testing, or internal networks without a domain.
+    Best for local iteration or internal testing without a domain. Uses the same K3s + gVisor execution model as production.
 
     ### 1. Install Docker
+
+    <Callout type="warn">
+    Local testing with the supported execution model is intended for Linux hosts. Docker Desktop is fine for evaluation, but it is not the supported self-hosted execution target.
+    </Callout>
 
     <Tabs items={['macOS', 'Windows', 'Linux']}>
       <Tab value="macOS">
@@ -50,8 +54,11 @@ Choose your deployment type:
     git clone https://github.com/supercheck-io/supercheck.git
     cd supercheck/deploy/docker
 
-    # Generate secrets and install gVisor automatically
+    # Generate secrets
     sudo bash init-secrets.sh
+
+    # Install local K3s + gVisor and create a restricted worker kubeconfig
+    sudo bash setup-k3s.sh
     ```
 
     Edit `.env` only if you want optional integrations (SMTP, AI, or OAuth).
@@ -59,7 +66,7 @@ Choose your deployment type:
     ### 3. Deploy
 
     ```bash
-    docker compose up -d
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-local.yml up -d --build
     ```
 
     ### 4. Access
@@ -69,14 +76,18 @@ Choose your deployment type:
 
     **Create Super Admin (Optional):**
     ```bash
-    docker compose exec app npm run setup:admin your-email@example.com
+    docker compose -f docker-compose-local.yml exec app npm run setup:admin your-email@example.com
     ```
   </Tab>
 
   <Tab value="Production (HTTPS)">
-    For production with HTTPS, custom domain, and status pages.
+    Recommended production path. Uses the same Kubernetes Job + gVisor execution model as cloud.
 
     ### 1. Install Docker
+
+    <Callout type="warn">
+    Production self-hosting is intended for Linux hosts. Docker Desktop on macOS/Windows is fine for local evaluation, but local K3s + gVisor on Linux is the supported production path.
+    </Callout>
 
     <Tabs items={['macOS', 'Windows', 'Linux']}>
       <Tab value="macOS">
@@ -122,8 +133,11 @@ Choose your deployment type:
     git clone https://github.com/supercheck-io/supercheck.git
     cd supercheck/deploy/docker
 
-    # Generate secrets and install gVisor automatically
+    # Generate secrets
     sudo bash init-secrets.sh
+
+    # Install local K3s + gVisor and create a restricted worker kubeconfig
+    sudo bash setup-k3s.sh
     ```
 
     Edit `.env`:
@@ -156,7 +170,7 @@ Choose your deployment type:
     ### 4. Deploy
 
     ```bash
-    docker compose -f docker-compose-secure.yml up -d
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-secure.yml up -d
     ```
 
     ### 5. Access
@@ -335,14 +349,14 @@ Enable AI-powered test creation, fixes, and performance analysis. Choose your pr
 
 ### Scaling Workers
 
-Workers execute Playwright and k6 workloads via `child_process.spawn`, sandboxed by gVisor at the runtime level.
+All supported self-hosted deployments now use the same execution model as cloud. The long-lived worker stays in Docker Compose as a control-plane container, but every Playwright and k6 run executes in its own ephemeral gVisor Job in the `supercheck-execution` namespace.
 
 <Callout type="info">
-**gVisor Sandbox:** The `init-secrets.sh` script automatically installs [gVisor](https://gvisor.dev) during setup. All worker containers run under `runtime: runsc` for kernel-level syscall isolation. If auto-install failed (e.g., Docker Desktop), run `sudo bash setup-gvisor.sh` manually before starting.
+**gVisor Sandbox:** `setup-k3s.sh` installs K3s, installs [gVisor](https://gvisor.dev), registers `runsc` for Docker Compose workers, creates the `gvisor` RuntimeClass, provisions the `supercheck-execution` namespace, and writes `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker. Keep `runtime: runsc` on the worker container as well so both the control plane and per-run execution Jobs consistently use gVisor.
 </Callout>
 
 <Callout type="info">
-Single-location deployments should keep `WORKER_LOCATION=local` (the default). This makes each worker process all regional queues on that server. When only one location is configured, the UI automatically skips location selection dialogs in monitor configuration, K6 tests, and job creation.
+Single-location deployments should keep `WORKER_LOCATION=local` (the default). The `local` location is a built-in location exclusive to self-hosted deployments. This makes each worker process all regional queues on that server. When only one location is configured, the UI automatically skips location selection dialogs in monitor configuration, K6 tests, and job creation.
 </Callout>
 
 <Callout type="info">
@@ -357,7 +371,9 @@ Locations are managed by the Super Admin. To expand to multiple regions later, s
 
 ```bash
 # Scale to 2 workers
-WORKER_REPLICAS=2 RUNNING_CAPACITY=2 QUEUED_CAPACITY=20 docker compose up -d
+WORKER_REPLICAS=2 RUNNING_CAPACITY=2 QUEUED_CAPACITY=20 \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+docker compose up -d
 ```
 
 | Configuration | `WORKER_REPLICAS` | `RUNNING_CAPACITY` | Minimum Server |
@@ -383,7 +399,8 @@ docker compose exec -T postgres psql -U postgres supercheck < backup.sql
 ### Updates
 
 ```bash
-docker compose pull && docker compose up -d
+docker compose pull && \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
 ```
 
 ### Troubleshooting

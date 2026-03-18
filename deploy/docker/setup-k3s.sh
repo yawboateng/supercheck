@@ -5,7 +5,8 @@
 # sandboxed test execution. Replaces Docker-socket-based execution.
 #
 # Usage:
-#   curl -sfL https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-k3s.sh | bash
+#   curl -fsSL -o setup-k3s.sh https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-k3s.sh
+#   sudo bash setup-k3s.sh
 #   # or
 #   chmod +x setup-k3s.sh && sudo ./setup-k3s.sh
 #
@@ -20,8 +21,9 @@
 #   3. Configures containerd to use runsc handler
 #   4. Creates gVisor RuntimeClass in Kubernetes
 #   5. Creates supercheck-execution namespace with security policies
-#   6. Labels the node for gVisor scheduling
-#   7. Verifies gVisor works with a test pod
+#   6. Creates restricted worker RBAC and a Docker-friendly kubeconfig
+#   7. Labels the node for gVisor scheduling
+#   8. Verifies gVisor works with a test pod
 
 set -euo pipefail
 
@@ -57,19 +59,41 @@ elif [[ "$ARCH" == "aarch64" ]]; then
   GVISOR_ARCH="aarch64"
 fi
 
+if ! command -v sha512sum &>/dev/null; then
+  error "sha512sum is required to verify gVisor downloads"
+  exit 1
+fi
+
+HOST_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i+1); exit}}')
+if [[ -z "$HOST_IP" ]]; then
+  error "Failed to detect host IP address for Kubernetes API access"
+  exit 1
+fi
+
 info "Architecture: $ARCH"
+info "Host IP: $HOST_IP"
 info "Starting SuperCheck K3s + gVisor setup..."
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+# Pin K3s to a vetted version and use the official gVisor release channel format.
+K3S_VERSION="v1.32.10+k3s1"
+GVISOR_RELEASE="${GVISOR_RELEASE:-latest}"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 # ─── Step 1: Install K3s (containerd, no Docker) ─────────────────────────────
 
 if command -v k3s &>/dev/null; then
   warn "K3s is already installed, skipping installation"
 else
-  log "Installing K3s with containerd runtime..."
-  curl -sfL https://get.k3s.io | sh -s - \
+  log "Installing K3s ${K3S_VERSION} with containerd runtime..."
+  curl -fsSL https://get.k3s.io -o "${TMP_DIR}/install-k3s.sh"
+  chmod 0755 "${TMP_DIR}/install-k3s.sh"
+  INSTALL_K3S_VERSION="${K3S_VERSION}" sh "${TMP_DIR}/install-k3s.sh" \
     --write-kubeconfig-mode 644 \
-    --disable traefik \
-    --kubelet-arg="allowed-unsafe-sysctls=net.*"
+    --tls-san "${HOST_IP}" \
+    --disable traefik
 
   # Wait for K3s to be ready
   info "Waiting for K3s to be ready..."
@@ -95,18 +119,39 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 if command -v runsc &>/dev/null; then
   warn "gVisor (runsc) is already installed: $(runsc --version 2>&1 | head -1)"
 else
-  log "Installing gVisor (runsc)..."
+  log "Installing gVisor (runsc) release ${GVISOR_RELEASE}..."
 
   # Install from gVisor release repository
-  GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+  GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${GVISOR_ARCH}"
 
-  curl -fsSL "${GVISOR_URL}/runsc" -o /usr/local/bin/runsc
-  curl -fsSL "${GVISOR_URL}/containerd-shim-runsc-v1" -o /usr/local/bin/containerd-shim-runsc-v1
+  curl -fsSL "${GVISOR_URL}/runsc" -o "${TMP_DIR}/runsc"
+  curl -fsSL "${GVISOR_URL}/runsc.sha512" -o "${TMP_DIR}/runsc.sha512"
+  curl -fsSL "${GVISOR_URL}/containerd-shim-runsc-v1" -o "${TMP_DIR}/containerd-shim-runsc-v1"
+  curl -fsSL "${GVISOR_URL}/containerd-shim-runsc-v1.sha512" -o "${TMP_DIR}/containerd-shim-runsc-v1.sha512"
 
-  chmod +x /usr/local/bin/runsc
-  chmod +x /usr/local/bin/containerd-shim-runsc-v1
+  (
+    cd "$TMP_DIR"
+    sha512sum -c runsc.sha512
+    sha512sum -c containerd-shim-runsc-v1.sha512
+  )
+
+  install -m 0755 "${TMP_DIR}/runsc" /usr/local/bin/runsc
+  install -m 0755 "${TMP_DIR}/containerd-shim-runsc-v1" /usr/local/bin/containerd-shim-runsc-v1
 
   log "gVisor installed: $(runsc --version 2>&1 | head -1)"
+fi
+
+# ─── Step 2b: Register runsc as a Docker runtime ─────────────────────────────
+
+if command -v docker &>/dev/null; then
+  if docker info 2>/dev/null | grep -q "runsc"; then
+    warn "Docker already has runsc runtime configured, skipping"
+  else
+    log "Registering runsc as a Docker runtime for Compose workers..."
+    runsc install
+    systemctl restart docker
+    log "Docker runtime runsc registered successfully"
+  fi
 fi
 
 # ─── Step 3: Configure containerd for gVisor ─────────────────────────────────
@@ -190,14 +235,133 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
 YAML
 
-# ─── Step 7: Label the node for gVisor scheduling ────────────────────────────
+# ─── Step 7: Create restricted worker RBAC + kubeconfig ──────────────────────
+
+log "Creating restricted worker RBAC for external Docker Compose workers..."
+k3s kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: supercheck-workers
+  labels:
+    app.kubernetes.io/name: supercheck-workers
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: supercheck-worker
+  namespace: supercheck-workers
+  labels:
+    app.kubernetes.io/name: supercheck-worker
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: execution-manager
+  namespace: supercheck-execution
+  labels:
+    app.kubernetes.io/part-of: supercheck
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: worker-execution-manager
+  namespace: supercheck-execution
+  labels:
+    app.kubernetes.io/part-of: supercheck
+subjects:
+  - kind: ServiceAccount
+    name: supercheck-worker
+    namespace: supercheck-workers
+roleRef:
+  kind: Role
+  name: execution-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: supercheck-worker-token
+  namespace: supercheck-workers
+  annotations:
+    kubernetes.io/service-account.name: supercheck-worker
+type: kubernetes.io/service-account-token
+YAML
+
+WORKER_KUBECONFIG="/etc/rancher/k3s/supercheck-worker.kubeconfig"
+API_SERVER=$(k3s kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')
+API_PORT="${API_SERVER##*:}"
+API_SERVER="https://${HOST_IP}:${API_PORT}"
+CA_DATA=$(k3s kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+TOKEN=""
+
+info "Waiting for worker service-account token..."
+for i in $(seq 1 30); do
+  TOKEN=$(k3s kubectl get secret supercheck-worker-token -n supercheck-workers -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+  if [[ -n "$TOKEN" ]]; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ -z "$TOKEN" ]]; then
+  error "Failed to retrieve service-account token for supercheck-worker"
+  exit 1
+fi
+
+cat > "$WORKER_KUBECONFIG" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: supercheck-k3s
+    cluster:
+      certificate-authority-data: ${CA_DATA}
+      server: ${API_SERVER}
+contexts:
+  - name: supercheck-worker@supercheck-k3s
+    context:
+      cluster: supercheck-k3s
+      user: supercheck-worker
+      namespace: supercheck-execution
+current-context: supercheck-worker@supercheck-k3s
+users:
+  - name: supercheck-worker
+    user:
+      token: ${TOKEN}
+EOF
+
+chmod 0640 "$WORKER_KUBECONFIG"
+# The worker container runs as UID 1000 (pwuser). The kubeconfig is bind-mounted
+# read-only, so the file must be group- or world-readable. Mode 0640 lets the
+# host admin restrict access to a specific group while still allowing the
+# non-root container to read the file.
+# If the deployer adds UID 1000 to the owning group, 0640 is sufficient.
+# For simpler setups (Coolify/Dokploy), 0644 also works.
+chown root:1000 "$WORKER_KUBECONFIG" 2>/dev/null || chmod 0644 "$WORKER_KUBECONFIG"
+log "Restricted worker kubeconfig written to $WORKER_KUBECONFIG (readable by UID 1000)"
+
+# ─── Step 8: Label the node for gVisor scheduling ────────────────────────────
 
 NODE_NAME=$(k3s kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 log "Labeling node '$NODE_NAME' for gVisor scheduling..."
 k3s kubectl label node "$NODE_NAME" gvisor.io/enabled=true --overwrite
 k3s kubectl label node "$NODE_NAME" workload=worker --overwrite
 
-# ─── Step 8: Verify gVisor works ─────────────────────────────────────────────
+# ─── Step 9: Verify gVisor works ─────────────────────────────────────────────
 
 log "Verifying gVisor sandbox with a test pod..."
 k3s kubectl delete pod gvisor-test -n supercheck-execution --ignore-not-found 2>/dev/null
@@ -219,7 +383,7 @@ spec:
       type: RuntimeDefault
   containers:
     - name: test
-      image: busybox:latest
+      image: busybox:1.37.0
       command: ["sh", "-c", "echo 'gVisor sandbox works!' && dmesg 2>&1 | head -1 || echo 'dmesg blocked (expected in gVisor)'"]
       securityContext:
         allowPrivilegeEscalation: false
@@ -263,7 +427,9 @@ info "Namespace: supercheck-execution (restricted PSS)"
 echo ""
 info "Next steps:"
 info "  1. Deploy SuperCheck with: kubectl apply -k deploy/k8s/overlays/self-hosted/"
-info "  2. Or use Docker Compose for app + worker with K3s handling execution"
+info "  2. Or run Docker Compose with K3s-backed execution using:"
+info "     KUBECONFIG_FILE=${WORKER_KUBECONFIG} docker compose -f docker-compose-secure.yml up -d"
 info ""
-info "Kubeconfig: export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"
+info "Admin kubeconfig:   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml"
+info "Worker kubeconfig:  ${WORKER_KUBECONFIG}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -260,9 +260,9 @@ export function MonitorCreationWizard() {
     setApiData(monitorApiData);
 
     // When skipping the location step (single location), auto-set the
-    // locationConfig to the actual available location instead of relying
-    // on DEFAULT_LOCATION_CONFIG which hardcodes "local". This prevents
-    // a 400 error when the only available location isn't "local".
+    // locationConfig to the actual available location. DEFAULT_LOCATION_CONFIG
+    // has an empty locations array; this ensures the DB config contains the
+    // real location code for the single-location case.
     if (!locationsLoading && !hasMultipleLocations && dynamicLocations.length === 1) {
       setLocationConfig({
         enabled: false,

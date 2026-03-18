@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 - Fixed email notification test connection only sending to the first email address when multiple addresses are configured ([#269](https://github.com/supercheck-io/supercheck/issues/269))
+- Fixed mid-run cancellations being recorded as generic failures instead of cancellations when the cancellation poller deletes the execution pod before `waitForExecutionOutcome` can read pod status
+- Fixed K6 run submissions being rejected with "No active worker" during the 30-second heartbeat refresh window after a worker starts consuming a new queue
+- Fixed `/api/locations/available` returning 500 when Redis heartbeat scan fails — the endpoint now gracefully degrades by marking all locations as offline instead of failing the entire response
+- Fixed Redis payload validation in admin location capacity counting to properly validate JSON structure before accessing nested properties
+- Fixed stale queue cleanup in K6 and monitor dynamic worker services to use `Promise.allSettled` so one queue removal failure doesn't prevent cleanup of remaining queues
+- Added debug logging for exit code read failures in Kubernetes execution pods
 
 ### Security
 - Updated Next.js from 16.1.6 to 16.1.7 — fixes HTTP request smuggling in rewrites, CSRF bypass via null origin, DoS via unbounded postponed resume buffering, and HMR websocket CSRF bypass

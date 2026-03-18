@@ -267,15 +267,25 @@ services:
   worker:
     image: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-latest}
     init: true
+    user: "1000:1000"
     environment:
       <<: *common-env
       WORKER_IMAGE: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-latest}
-    # gVisor sandbox: set WORKER_RUNTIME=runsc after installing gVisor on the host.
-    # Defaults to runc so one-click deploys work without host preparation.
-    # Install gVisor: https://gvisor.dev/docs/user_guide/install/
-    runtime: ${WORKER_RUNTIME:-runc}
+      EXECUTION_NAMESPACE: ${EXECUTION_NAMESPACE:-supercheck-execution}
+      KUBECONFIG: /run/secrets/supercheck-kubeconfig
+    # gVisor sandbox is the production default for untrusted execution.
+    # Production prerequisite: install local K3s + gVisor before deploying.
+    runtime: ${WORKER_RUNTIME:-runsc}
+    read_only: true
+    tmpfs:
+      - /tmp:size=2G,uid=1000,gid=1000,mode=1777
+      - /home/pwuser/.cache:size=256M,uid=1000,gid=1000,mode=0700
+      - /home/pwuser/.npm:size=256M,uid=1000,gid=1000,mode=0700
     volumes:
       - worker-reports:/worker/report
+      - ${KUBECONFIG_FILE:-/etc/rancher/k3s/supercheck-worker.kubeconfig}:/run/secrets/supercheck-kubeconfig:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -298,11 +308,14 @@ services:
         limits:
           cpus: "1.8"
           memory: 3G
+          pids: 512
         reservations:
           cpus: "0.5"
           memory: 1G
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     networks:
       - dokploy-network
 

@@ -17,6 +17,8 @@ export interface LocationData {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  /** Whether at least one worker is actively processing this location. */
+  online?: boolean;
 }
 
 export interface AdminLocationsResponse {

@@ -58,7 +58,7 @@ abstract class BaseK6ExecutionProcessor extends WorkerHost {
     job: Job<K6Task>,
   ): Promise<{ success: boolean; timedOut?: boolean; error?: string }> {
     const processStartTime = Date.now();
-    const requestedLocation = job.data.location || 'local';
+    const requestedLocation = job.data.location || this.workerLocation;
     const normalizedJobLocation = requestedLocation.toLowerCase();
     const jobLocationIsWildcard = this.isWildcardLocation(
       normalizedJobLocation,

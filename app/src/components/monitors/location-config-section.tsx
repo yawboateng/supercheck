@@ -119,6 +119,15 @@ function LocationConfigSectionComponent({
     return {};
   }, [dynamicLocations]);
 
+  // Build online status lookup from dynamic locations
+  const onlineStatusMap = React.useMemo(() => {
+    const map: Record<string, boolean> = {};
+    for (const loc of dynamicLocations) {
+      map[loc.code] = loc.online ?? true; // default to online if field absent
+    }
+    return map;
+  }, [dynamicLocations]);
+
   // All available location codes
   const availableLocationCodes = React.useMemo(
     () => Object.keys(metadataMap),
@@ -157,8 +166,12 @@ function LocationConfigSectionComponent({
       const cleaned =
         validSelectedLocations.length > 0
           ? validSelectedLocations
-          : [availableLocationCodes[0] || "local"];
-      onChange({ ...config, locations: cleaned });
+          : availableLocationCodes[0]
+            ? [availableLocationCodes[0]]
+            : [];
+      if (cleaned.length > 0) {
+        onChange({ ...config, locations: cleaned });
+      }
     }
     // Only run when available locations or raw config locations change
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,7 +187,7 @@ function LocationConfigSectionComponent({
       enabled &&
       (!currentConfig.locations || currentConfig.locations.length === 0)
     ) {
-      newConfig.locations = [availableLocationCodes[0] || "local"];
+      newConfig.locations = availableLocationCodes[0] ? [availableLocationCodes[0]] : [];
     }
     onChange(newConfig);
   };
@@ -292,6 +305,19 @@ function LocationConfigSectionComponent({
                               <span className="font-medium text-sm">
                                 {metadata.name}
                               </span>
+                              <span
+                                className={cn(
+                                  "inline-block h-2 w-2 rounded-full flex-shrink-0",
+                                  onlineStatusMap[location] !== false
+                                    ? "bg-green-500"
+                                    : "bg-muted-foreground/40"
+                                )}
+                                title={
+                                  onlineStatusMap[location] !== false
+                                    ? "Worker online"
+                                    : "Worker offline"
+                                }
+                              />
                             </div>
                           </div>
                         </div>

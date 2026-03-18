@@ -6,7 +6,8 @@
 # child processes (Playwright, k6, monitors) inherit the sandbox.
 #
 # Usage:
-#   curl -sfL https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-gvisor.sh | sudo bash
+#   curl -fsSL -o setup-gvisor.sh https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-gvisor.sh
+#   sudo bash setup-gvisor.sh
 #   # or
 #   chmod +x setup-gvisor.sh && sudo ./setup-gvisor.sh
 #
@@ -54,6 +55,11 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
+if ! command -v sha512sum &>/dev/null; then
+  error "sha512sum is required to verify gVisor downloads"
+  exit 1
+fi
+
 ARCH=$(uname -m)
 if [[ "$ARCH" != "x86_64" ]] && [[ "$ARCH" != "aarch64" ]]; then
   error "Unsupported architecture: $ARCH (only x86_64 and aarch64 are supported)"
@@ -71,17 +77,29 @@ info "Architecture: $ARCH"
 info "Docker: $(docker --version)"
 info "Starting SuperCheck gVisor setup for Docker..."
 
+# ─── Configuration ────────────────────────────────────────────────────────────
+
+# Follow the official gVisor release channel format. "latest" tracks the latest
+# stable release; operators can override with a specific YYYYMMDD or YYYYMMDD.rc.
+GVISOR_RELEASE="${GVISOR_RELEASE:-latest}"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 # ─── Step 1: Install gVisor (runsc) ──────────────────────────────────────────
 
 if command -v runsc &>/dev/null; then
   warn "gVisor (runsc) is already installed: $(runsc --version 2>&1 | head -1)"
 else
-  log "Installing gVisor (runsc)..."
+  log "Installing gVisor (runsc) release ${GVISOR_RELEASE}..."
 
-  GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+  GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${GVISOR_ARCH}"
 
-  curl -fsSL "${GVISOR_URL}/runsc" -o /usr/local/bin/runsc
-  chmod +x /usr/local/bin/runsc
+  curl -fsSL "${GVISOR_URL}/runsc" -o "${TMP_DIR}/runsc"
+  curl -fsSL "${GVISOR_URL}/runsc.sha512" -o "${TMP_DIR}/runsc.sha512"
+
+  (cd "$TMP_DIR" && sha512sum -c runsc.sha512)
+
+  install -m 0755 "${TMP_DIR}/runsc" /usr/local/bin/runsc
 
   log "gVisor installed: $(runsc --version 2>&1 | head -1)"
 fi
@@ -128,7 +146,7 @@ log "Verifying gVisor sandbox with a test container..."
 # Remove any leftover test container
 docker rm -f gvisor-test 2>/dev/null || true
 
-TEST_OUTPUT=$(docker run --rm --name gvisor-test --runtime=runsc busybox:latest \
+TEST_OUTPUT=$(docker run --rm --name gvisor-test --runtime=runsc busybox:1.37.0 \
   sh -c "echo 'gVisor sandbox works!' && dmesg 2>&1 | head -1 || echo 'dmesg blocked (expected in gVisor)'" 2>&1)
 
 if echo "$TEST_OUTPUT" | grep -q "gVisor sandbox works!"; then

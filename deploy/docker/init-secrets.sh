@@ -45,34 +45,6 @@ REDIS_PASSWORD=$(generate_secret 16)
 MINIO_ACCESS_KEY=$(generate_secret 16)
 MINIO_SECRET_KEY=$(generate_secret 32)
 
-# Install gVisor (required for worker sandbox)
-GVISOR_READY=false
-if command -v runsc &>/dev/null && docker info 2>/dev/null | grep -q "runsc"; then
-  echo -e "${GREEN}🛡️  gVisor already installed — worker sandbox ready${NC}"
-  GVISOR_READY=true
-else
-  echo -e "${YELLOW}🛡️  Installing gVisor (required for worker sandbox)...${NC}"
-  if [[ $EUID -eq 0 ]]; then
-    # Running as root — install directly
-    if bash "${SCRIPT_DIR}/setup-gvisor.sh"; then
-      echo -e "${GREEN}🛡️  gVisor installed successfully${NC}"
-      GVISOR_READY=true
-    else
-      echo -e "${RED}❌ gVisor installation failed${NC}"
-      echo -e "   Try manually: ${BLUE}sudo bash setup-gvisor.sh${NC}"
-    fi
-  else
-    # Not root — try with sudo
-    if sudo bash "${SCRIPT_DIR}/setup-gvisor.sh"; then
-      echo -e "${GREEN}🛡️  gVisor installed successfully${NC}"
-      GVISOR_READY=true
-    else
-      echo -e "${RED}❌ gVisor installation failed${NC}"
-      echo -e "   Try manually: ${BLUE}sudo bash setup-gvisor.sh${NC}"
-    fi
-  fi
-fi
-
 # Create .env file
 cat > "$ENV_FILE" << EOF
 # ============================================================
@@ -229,15 +201,11 @@ echo -e "   1. Review optional integrations in .env (SMTP, AI, OAuth):"
 echo -e "      ${BLUE}nano .env${NC}"
 echo -e "      Set up SMTP for email notifications, AI provider for AI features, or OAuth for social login.${NC}"
 echo ""
-if [ "$GVISOR_READY" = true ]; then
-echo -e "   2. ${GREEN}✅ gVisor is installed and ready${NC}"
-else
-echo -e "   2. ${RED}⚠️  Install gVisor before starting (required):${NC}"
-echo -e "      ${BLUE}sudo bash setup-gvisor.sh${NC}"
-fi
+echo -e "   2. Install local K3s + gVisor:"
+echo -e "      ${BLUE}sudo bash setup-k3s.sh${NC}"
 echo ""
 echo -e "   3. Start Supercheck:"
-echo -e "      ${BLUE}docker compose up -d${NC}"
+echo -e "      ${BLUE}KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d${NC}"
 echo ""
 echo -e "   4. Access at:"
 echo -e "      ${BLUE}http://localhost:3000${NC}"

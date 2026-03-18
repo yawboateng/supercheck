@@ -32,7 +32,7 @@ export class MonitorDynamicWorkerService
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger('MonitorDynamicWorkerService');
-  private readonly workers: Worker[] = [];
+  private readonly workers = new Map<string, Worker>();
   private readonly activeQueueNames = new Set<string>();
   private connection: Redis | null = null;
   private subscriber: Redis | null = null;
@@ -85,8 +85,8 @@ export class MonitorDynamicWorkerService
       this.subscriber = null;
     }
 
-    await Promise.allSettled(this.workers.map((w) => w.close()));
-    this.workers.length = 0;
+    await Promise.allSettled(Array.from(this.workers.values()).map((w) => w.close()));
+    this.workers.clear();
 
     if (this.connection) {
       await this.connection.quit().catch(() => {});
@@ -138,11 +138,31 @@ export class MonitorDynamicWorkerService
       );
     });
 
-    this.workers.push(worker);
+    this.workers.set(queueName, worker);
     this.activeQueueNames.add(queueName);
     this.logger.log(
       `Registered dynamic monitor worker for queue: ${queueName}`,
     );
+  }
+
+  private async removeWorkerForQueue(queueName: string): Promise<void> {
+    const worker = this.workers.get(queueName);
+    if (!worker) return;
+
+    try {
+      await worker.close();
+    } catch (error) {
+      this.logger.warn(
+        `Failed to close dynamic monitor worker for ${queueName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    this.workers.delete(queueName);
+    this.activeQueueNames.delete(queueName);
+    this.heartbeatService.removeQueues([queueName]);
+    this.logger.log(`Removed dynamic monitor worker for queue: ${queueName}`);
   }
 
   /**
@@ -194,6 +214,7 @@ export class MonitorDynamicWorkerService
     } catch {
       newQueues = await this.getQueueNames(this.workerLocation);
     }
+    const targetQueues = new Set(newQueues);
     let added = 0;
     for (const queueName of newQueues) {
       if (!this.activeQueueNames.has(queueName)) {
@@ -202,8 +223,21 @@ export class MonitorDynamicWorkerService
         added++;
       }
     }
+    const removedQueues = Array.from(this.activeQueueNames).filter(
+      (queueName) => !targetQueues.has(queueName),
+    );
+    if (removedQueues.length > 0) {
+      await Promise.allSettled(
+        removedQueues.map((queueName) => this.removeWorkerForQueue(queueName)),
+      );
+    }
     if (added > 0) {
       this.logger.log(`Queue refresh: added ${added} new monitor queue(s)`);
+    }
+    if (removedQueues.length > 0) {
+      this.logger.log(
+        `Queue refresh: removed ${removedQueues.length} stale monitor queue(s)`,
+      );
     }
   }
 

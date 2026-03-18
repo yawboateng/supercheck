@@ -34,10 +34,15 @@ export function buildLocationMetadataMap(
 
 /**
  * Default location configuration for new monitors.
+ * The `locations` array is intentionally empty — the actual location(s) are
+ * resolved at runtime by `resolveDefaultMonitorLocations()`, which respects
+ * the hosting mode (self-hosted = "local" fallback, cloud = first enabled).
+ * Setting `enabled: false` means single-location mode; the array is only
+ * a UI hint and is overwritten when users interact with the location picker.
  */
 export const DEFAULT_LOCATION_CONFIG: LocationConfig = {
   enabled: false,
-  locations: ["local"],
+  locations: [],
   threshold: 50, // Majority must be up
   strategy: "majority",
 };
