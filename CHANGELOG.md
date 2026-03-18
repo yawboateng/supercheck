@@ -12,6 +12,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Fixed
 - Fixed email notification test connection only sending to the first email address when multiple addresses are configured ([#269](https://github.com/supercheck-io/supercheck/issues/269))
 
+### Security
+- Updated Next.js from 16.1.6 to 16.1.7 — fixes HTTP request smuggling in rewrites, CSRF bypass via null origin, DoS via unbounded postponed resume buffering, and HMR websocket CSRF bypass
+- Updated fast-xml-parser from 5.3.8 to 5.5.6 — fixes CVE-2026-26278 (numeric entity expansion bypassing entity expansion limits)
+- Added override for file-type ≥21.3.2 — fixes ZIP decompression bomb DoS and infinite loop in ASF parser
+- Added override for yauzl ≥3.2.1 — fixes off-by-one error
+- Added override for flatted ≥3.4.0 — fixes unbounded recursion DoS in parse() revive phase
+- Added override for ajv ^8 → 8.18.0 — fixes ReDoS when using `$data` option
+
 
 ## [1.3.2] - 2026-03-12
 
