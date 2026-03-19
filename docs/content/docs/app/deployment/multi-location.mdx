@@ -67,7 +67,7 @@ Queue names now follow a dynamic pattern derived from enabled locations in Super
 - K6: `k6-global` plus `k6-{location-code}`
 - Monitors: `monitor-{location-code}`
 
-The examples below use the built-in `us-east`, `eu-central`, and `asia-pacific` location codes, but any enabled custom location follows the same routing pattern.
+The examples below use sample location codes like `us-east`, `eu-central`, and `asia-pacific`, but any enabled custom location follows the same routing pattern.
 
 | `WORKER_LOCATION` | Queues Processed | Use Case |
 |-------------------|-----------------|----------|
@@ -372,6 +372,7 @@ docker compose -f docker-compose-worker.yml up -d
 - **VPN** (WireGuard, Tailscale)
 - **Firewall rules** (UFW, iptables, Cloud Security Groups)
 - **Encrypted tunnels**
+- **Host-level K3s + gVisor** on every worker server via `setup-k3s.sh`
 
 Detailed network security configuration is beyond the scope of this documentation. Please consult your infrastructure provider's security best practices.
 </Callout>

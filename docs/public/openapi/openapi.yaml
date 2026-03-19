@@ -1307,7 +1307,7 @@ paths:
               properties:
                 location:
                   type: string
-                  description: Execution location for performance tests (e.g. `us-east-1`)
+                  description: Execution location for performance tests. Use an enabled location code (for example `us-east`) or `global` for unrestricted any-worker routing.
       responses:
         '200':
           description: Test execution started
@@ -2907,4 +2907,3 @@ components:
           type: string
         region:
           type: string
-

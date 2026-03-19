@@ -1,10 +1,12 @@
-# documentation: https://supercheck.io/docs/self-hosting
+# documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # slogan: Open Source AI-Powered Test Automation & Monitoring Platform
 # tags: automation, playwright, k6, testing, monitoring, ai, uptime, synthetic-monitors
 # logo: svgs/supercheck.svg
 # port: 3000
 
 # Supercheck Coolify One-Click Template
+# Important: run deploy/docker/setup-k3s.sh on the host first so the worker
+# can mount /etc/rancher/k3s/supercheck-worker.kubeconfig and submit gVisor Jobs.
 # https://github.com/supercheck-io/supercheck
 
 # YAML anchors for shared configuration
@@ -125,7 +127,8 @@ x-common-env: &common-env # Database Configuration
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
 
-  # Worker Location
+  # Worker Location (use "local" for single-server self-hosted mode,
+  # or any enabled Super Admin location code)
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # Self-Hosted Mode

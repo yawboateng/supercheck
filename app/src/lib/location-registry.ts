@@ -34,15 +34,28 @@ function filterLocal<T extends { code: string }>(locs: T[]): T[] {
   return shouldExcludeLocal() ? locs.filter((l) => l.code !== LOCAL_LOCATION_CODE) : locs;
 }
 
-/** Filter out "local" from a code array when running in cloud mode. */
-function filterLocalCodes(codes: string[]): string[] {
-  return shouldExcludeLocal() ? codes.filter((c) => c !== LOCAL_LOCATION_CODE) : codes;
+/**
+ * Remove restrictions that are hidden by the current hosting mode.
+ * In cloud mode, stale `"local"` rows must not keep a project in a
+ * restricted-but-empty state.
+ */
+export function getVisibleProjectRestrictions<T extends { code: string }>(
+  restrictions: T[]
+): T[] {
+  return shouldExcludeLocal()
+    ? restrictions.filter((restriction) => restriction.code !== LOCAL_LOCATION_CODE)
+    : restrictions;
 }
 
 interface ProjectLocationAvailability {
   locations: Location[];
   hasRestrictions: boolean;
 }
+
+type ProjectLocationRestriction = {
+  locationId: string;
+  code: string;
+};
 
 // ── In-Memory Cache ─────────────────────────────────────────────
 interface LocationCache {
@@ -152,11 +165,18 @@ async function getProjectLocationAvailability(
   projectId: string
 ): Promise<ProjectLocationAvailability> {
   const restrictions = await db
-    .select({ locationId: projectLocations.locationId })
+    .select({
+      locationId: projectLocations.locationId,
+      code: locations.code,
+    })
     .from(projectLocations)
+    .innerJoin(locations, eq(projectLocations.locationId, locations.id))
     .where(eq(projectLocations.projectId, projectId));
 
-  if (restrictions.length === 0) {
+  const visibleRestrictions =
+    getVisibleProjectRestrictions<ProjectLocationRestriction>(restrictions);
+
+  if (visibleRestrictions.length === 0) {
     // No restrictions — all enabled locations
     return {
       locations: await getEnabledLocations(),
@@ -164,7 +184,7 @@ async function getProjectLocationAvailability(
     };
   }
 
-  const restrictedIds = restrictions.map((r) => r.locationId);
+  const restrictedIds = visibleRestrictions.map((restriction) => restriction.locationId);
   const restricted = await db
     .select()
     .from(locations)

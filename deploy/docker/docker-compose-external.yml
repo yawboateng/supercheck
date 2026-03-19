@@ -24,7 +24,7 @@
 #   - playwright-test-artifacts, playwright-job-artifacts, playwright-monitor-artifacts
 #   - k6-test-artifacts, k6-job-artifacts, status-page-artifacts, test-requirement-artifacts
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories
@@ -229,8 +229,9 @@ x-common-env: &common-env # Database Configuration - External PostgreSQL
   # --------------------------------------------------------------------------
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
-  # Worker Location for geo-distributed monitoring and load testing
-  # Options: local (processes all regional queues) | us-east | eu-central | asia-pacific
+  # Worker Location for geo-distributed monitoring and load testing.
+  # Use "local" for single-server self-hosted mode, or any enabled
+  # Super Admin location code for region-specific workers.
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # Traefik/HTTPS Configuration

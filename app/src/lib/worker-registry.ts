@@ -5,6 +5,10 @@
  * This module scans those keys to determine which locations have active workers.
  */
 import { getRedisConnection } from "@/lib/queue";
+import {
+  LOCAL_LOCATION_CODE,
+  shouldExcludeLocal,
+} from "@/lib/location-registry";
 
 const HEARTBEAT_PREFIX = "supercheck:worker-heartbeat:";
 
@@ -99,6 +103,21 @@ export async function getWorkerCountByLocation(): Promise<
   return counts;
 }
 
+export function shouldReportUnregisteredWorkerLocation(
+  location: string,
+  knownCodes: Set<string>
+): boolean {
+  if (knownCodes.has(location)) {
+    return false;
+  }
+
+  if (location !== LOCAL_LOCATION_CODE) {
+    return true;
+  }
+
+  return shouldExcludeLocal();
+}
+
 /**
  * Get location codes that have active workers but are NOT in the DB.
  * Used for "unregistered worker" alerts in Super Admin.
@@ -109,7 +128,7 @@ export async function getUnregisteredWorkerLocations(
   const workers = await getActiveWorkers();
   const unregistered = new Set<string>();
   for (const w of workers) {
-    if (!knownCodes.has(w.location) && w.location !== "local") {
+    if (shouldReportUnregisteredWorkerLocation(w.location, knownCodes)) {
       unregistered.add(w.location);
     }
   }

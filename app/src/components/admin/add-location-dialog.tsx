@@ -148,7 +148,7 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
                 placeholder="e.g. US West, Asia South"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                maxLength={120}
+                maxLength={100}
                 required
               />
             </div>
@@ -162,7 +162,7 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
                   placeholder="e.g. Portland"
                   value={region}
                   onChange={(e) => setRegion(e.target.value)}
-                  maxLength={120}
+                  maxLength={100}
                 />
               </div>
               <div className="space-y-2">
@@ -172,7 +172,7 @@ export function AddLocationDialog({ open, onOpenChange }: AddLocationDialogProps
                   placeholder="e.g. 🇺🇸"
                   value={flag}
                   onChange={(e) => setFlag(e.target.value)}
-                  maxLength={8}
+                  maxLength={10}
                 />
               </div>
             </div>

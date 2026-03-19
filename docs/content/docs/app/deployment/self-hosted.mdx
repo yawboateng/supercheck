@@ -14,7 +14,11 @@ For true multi-location monitoring, see [Multi-Location Workers](/docs/app/deplo
 
 [![Deploy on Coolify](https://img.shields.io/badge/Deploy%20on-Coolify-6B16ED?style=for-the-badge&logo=coolify&logoColor=white)](https://github.com/supercheck-io/supercheck/blob/main/deploy/coolify/README.md)
 
-One-click deployment on [Coolify](https://coolify.io) — the easiest way to self-host.
+Coolify template deployment for Linux hosts. Run `setup-k3s.sh` on the host first so the worker can use the Kubernetes + gVisor execution backend.
+
+<Callout type="warn">
+Self-hosted production is no longer a pure Docker-only deployment. The long-lived services stay in Docker Compose, but Playwright and k6 runs execute in local K3s under gVisor.
+</Callout>
 
 ---
 
@@ -352,7 +356,7 @@ Enable AI-powered test creation, fixes, and performance analysis. Choose your pr
 All supported self-hosted deployments now use the same execution model as cloud. The long-lived worker stays in Docker Compose as a control-plane container, but every Playwright and k6 run executes in its own ephemeral gVisor Job in the `supercheck-execution` namespace.
 
 <Callout type="info">
-**gVisor Sandbox:** `setup-k3s.sh` installs K3s, installs [gVisor](https://gvisor.dev), configures containerd with the `runsc` handler, creates the `gvisor` RuntimeClass, provisions the `supercheck-execution` namespace, applies the execution `ResourceQuota` and `NetworkPolicy`, and writes `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker. The Docker worker container itself stays on the normal Docker runtime; only the per-run Kubernetes execution Jobs use gVisor.
+**gVisor Sandbox:** `setup-k3s.sh` installs K3s, installs [gVisor](https://gvisor.dev), configures containerd with the `runsc` handler, creates the `gvisor` RuntimeClass, provisions the `supercheck-execution` namespace, applies the execution `LimitRange`, `ResourceQuota`, and `NetworkPolicy`, and writes `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker. The Docker worker container itself stays on the normal Docker runtime; only the per-run Kubernetes execution Jobs use gVisor.
 </Callout>
 
 <Callout type="info">

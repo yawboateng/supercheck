@@ -20,7 +20,7 @@
 #   2. Installs gVisor (runsc + containerd-shim-runsc-v1)
 #   3. Configures containerd to use runsc handler
 #   4. Creates gVisor RuntimeClass in Kubernetes
-#   5. Creates supercheck-execution namespace, ResourceQuota, and NetworkPolicy
+#   5. Creates supercheck-execution namespace, LimitRange, ResourceQuota, and NetworkPolicy
 #   6. Creates restricted worker RBAC and a Docker-friendly kubeconfig
 #   7. Labels the node for gVisor scheduling
 #   8. Verifies gVisor works with a test pod
@@ -250,7 +250,7 @@ YAML
 
 # ─── Step 6: Create execution namespace + guardrails ─────────────────────────
 
-log "Creating supercheck-execution namespace, ResourceQuota, and NetworkPolicy..."
+log "Creating supercheck-execution namespace, LimitRange, ResourceQuota, and NetworkPolicy..."
 k3s kubectl apply -f - <<'YAML'
 apiVersion: v1
 kind: Namespace
@@ -277,6 +277,29 @@ spec:
     limits.memory: "16Gi"
     count/jobs.batch: "10"
     pods: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: execution-guardrails
+  namespace: supercheck-execution
+  labels:
+    app.kubernetes.io/part-of: supercheck
+spec:
+  limits:
+    - type: Container
+      min:
+        cpu: "100m"
+        memory: "128Mi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "768Mi"
+      default:
+        cpu: "1500m"
+        memory: "2Gi"
+      max:
+        cpu: "4"
+        memory: "9Gi"
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -438,7 +461,6 @@ log "Restricted worker kubeconfig written to $WORKER_KUBECONFIG (readable by UID
 NODE_NAME=$(k3s kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 log "Labeling node '$NODE_NAME' for gVisor scheduling..."
 k3s kubectl label node "$NODE_NAME" gvisor.io/enabled=true --overwrite
-k3s kubectl label node "$NODE_NAME" workload=worker --overwrite
 
 # ─── Step 9: Verify gVisor works ─────────────────────────────────────────────
 
@@ -502,10 +524,10 @@ echo ""
 info "K3s:       $(k3s --version 2>&1 | head -1)"
 info "gVisor:    $(runsc --version 2>&1 | head -1)"
 info "Node:      $NODE_NAME (gvisor.io/enabled=true)"
-info "Execution NS: supercheck-execution (restricted PSS, quota, egress policy)"
+info "Execution NS: supercheck-execution (restricted PSS, limit range, quota, egress policy)"
 echo ""
 info "Next steps:"
-info "  1. Deploy SuperCheck with: kubectl apply -k deploy/k8s/overlays/self-hosted/"
+info "  1. Follow the deployment guide: https://supercheck.io/docs/app/deployment/self-hosted"
 info "  2. Or run Docker Compose with K3s-backed execution using:"
 info "     KUBECONFIG_FILE=${WORKER_KUBECONFIG} docker compose -f docker-compose-secure.yml up -d"
 info ""

@@ -6,7 +6,10 @@ import { projects } from "@/db/schema/organization";
 import { eq, and, inArray, asc } from "drizzle-orm";
 import { requireProjectContext } from "@/lib/project-context";
 import { checkPermissionWithContext } from "@/lib/rbac/middleware";
-import { invalidateLocationCache } from "@/lib/location-registry";
+import {
+  getVisibleProjectRestrictions,
+  invalidateLocationCache,
+} from "@/lib/location-registry";
 
 type ActionResult<T = undefined> = {
   success: boolean;
@@ -75,7 +78,7 @@ export async function getProjectLocationRestrictions(
       .where(eq(projectLocations.projectId, projectId))
       .orderBy(asc(locations.sortOrder));
 
-    return { success: true, data: rows };
+    return { success: true, data: getVisibleProjectRestrictions(rows) };
   } catch (error) {
     return {
       success: false,
@@ -113,7 +116,7 @@ export async function setProjectLocationRestrictions(
     // Validate all locations exist and are enabled
     if (locationIds.length > 0) {
       const validLocations = await db
-        .select({ id: locations.id })
+        .select({ id: locations.id, code: locations.code })
         .from(locations)
         .where(
           and(
@@ -122,10 +125,12 @@ export async function setProjectLocationRestrictions(
           )
         );
 
-      if (validLocations.length !== locationIds.length) {
+      const visibleValidLocations = getVisibleProjectRestrictions(validLocations);
+
+      if (visibleValidLocations.length !== locationIds.length) {
         return {
           success: false,
-          error: "Some locations are invalid or disabled",
+          error: "Some locations are invalid, disabled, or unavailable in this hosting mode",
         };
       }
     }

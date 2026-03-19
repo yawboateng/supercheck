@@ -211,7 +211,7 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
       return NextResponse.json(
         {
           success: false,
-          error: 'The "local" location cannot be deleted. It is the system fallback location. You can disable it instead.',
+          error: 'The "local" location cannot be deleted. It is reserved as the self-hosted fallback location.',
         },
         { status: 403 }
       );

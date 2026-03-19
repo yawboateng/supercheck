@@ -17,7 +17,7 @@
 # This file builds from source for local iteration, but uses the same K3s +
 # gVisor execution model as the production Compose variants.
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories

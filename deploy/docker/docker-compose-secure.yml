@@ -36,7 +36,7 @@
 #   IMPORTANT: Take regular backups! See Maintenance section in docs.
 #   Volume data can be lost if Docker is reinstalled or storage is reset.
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories
@@ -239,8 +239,9 @@ x-common-env: &common-env # Database Configuration
   # --------------------------------------------------------------------------
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
-  # Worker Location for geo-distributed monitoring and load testing
-  # Options: local (for local dev - processes all regions) | us-east | eu-central | asia-pacific (for production)
+  # Worker Location for geo-distributed monitoring and load testing.
+  # Use "local" for single-server self-hosted mode, or any enabled
+  # Super Admin location code for region-specific workers.
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # ACME/Let's Encrypt email for SSL certificates

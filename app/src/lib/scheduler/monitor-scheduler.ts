@@ -20,6 +20,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { EXECUTE_MONITOR_JOB_NAME } from './constants';
 import {
   partitionMonitorLocationsByAvailability,
+  resolveDefaultMonitorLocations,
   resolveMonitorLocations,
 } from '@/lib/monitor-location-routing';
 
@@ -186,7 +187,8 @@ async function recordSchedulingFailure(
       .where(eq(monitors.id, monitorId));
 
     // Determine a real location for the result row.
-    // Use the monitor's configured locations so we don't introduce a bogus region.
+    // Prefer DB-validated locations, then the last known result location, and
+    // only use `"local"` as the final degraded-install fallback.
     const monitor = await db.query.monitors.findFirst({
       where: eq(monitors.id, monitorId),
       columns: { config: true, projectId: true },
@@ -194,34 +196,51 @@ async function recordSchedulingFailure(
     const monitorConfig = monitor?.config as MonitorConfig | null;
     const locationConfig = monitorConfig?.locationConfig as LocationConfig | null;
     const configuredLocations = locationConfig?.locations;
-    let location: MonitoringLocation = "local" as MonitoringLocation;
-
-    try {
-      const resolvedLocations = await resolveMonitorLocations(
-        locationConfig,
-        monitor?.projectId ?? undefined
-      );
-      if (resolvedLocations[0]) {
-        location = resolvedLocations[0] as MonitoringLocation;
-      } else if (configuredLocations && configuredLocations.length > 0) {
-        location = configuredLocations[0] as MonitoringLocation;
-      }
-    } catch {
-      if (configuredLocations && configuredLocations.length > 0) {
-        location = configuredLocations[0] as MonitoringLocation;
-      }
-    }
 
     // Read the latest result to maintain consecutive failure counting
     const lastResult = await db.query.monitorResults.findFirst({
       where: eq(monitorResults.monitorId, monitorId),
       orderBy: [desc(monitorResults.checkedAt)],
       columns: {
+        location: true,
         isUp: true,
         consecutiveFailureCount: true,
         alertsSentForFailure: true,
       },
     });
+
+    let location: MonitoringLocation | undefined;
+
+    try {
+      const resolvedLocations = await resolveMonitorLocations(
+        locationConfig,
+        monitor?.projectId ?? undefined
+      );
+      location = resolvedLocations[0] as MonitoringLocation | undefined;
+    } catch {
+      // Fall through to the configured/default/last-known fallback chain below.
+    }
+
+    if (!location && configuredLocations && configuredLocations.length > 0) {
+      location = configuredLocations[0] as MonitoringLocation;
+    }
+
+    if (!location) {
+      try {
+        const defaultLocations = await resolveDefaultMonitorLocations(
+          monitor?.projectId ?? undefined
+        );
+        location = defaultLocations[0] as MonitoringLocation | undefined;
+      } catch {
+        // Keep falling back.
+      }
+    }
+
+    if (!location && lastResult?.location) {
+      location = lastResult.location as MonitoringLocation;
+    }
+
+    const fallbackLocation = location ?? ("local" as MonitoringLocation);
 
     const consecutiveFailureCount = lastResult && !lastResult.isUp
       ? (lastResult.consecutiveFailureCount ?? 0) + 1
@@ -234,7 +253,7 @@ async function recordSchedulingFailure(
     await db.insert(monitorResults).values({
       monitorId,
       checkedAt: now,
-      location,
+      location: fallbackLocation,
       status: 'error',
       isUp: false,
       isStatusChange,
@@ -249,7 +268,7 @@ async function recordSchedulingFailure(
 
     logger.warn(
       { monitorId, errorMessage, consecutiveFailureCount },
-      `Scheduling failure — monitor marked as down with result row (location=${location})`
+      `Scheduling failure — monitor marked as down with result row (location=${fallbackLocation})`
     );
   } catch (err) {
     logger.error(

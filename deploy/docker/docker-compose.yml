@@ -22,7 +22,7 @@
 #   PostgreSQL data is stored in a Docker named volume (postgres-data).
 #   IMPORTANT: Take regular backups! See Maintenance section in docs.
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories
@@ -81,8 +81,8 @@ x-common-env: &common-env # Database Configuration
   K6_JOB_EXECUTION_TIMEOUT_MS: ${K6_JOB_EXECUTION_TIMEOUT_MS:-3600000}
 
   # Worker Location for geo-distributed deployments
-  # Must match an enabled location code in Super Admin (e.g. local, us-east, eu-central, asia-pacific)
-  # Custom locations can be created via Super Admin panel
+  # Use "local" for single-server self-hosted mode, or set any enabled
+  # Super Admin location code (for example: us-east, eu-west, ap-south)
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # AWS S3 / MinIO Configuration

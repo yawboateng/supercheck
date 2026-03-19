@@ -122,7 +122,7 @@ export function EditLocationDialog({
                 id="edit-location-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                maxLength={120}
+                maxLength={100}
                 required
               />
             </div>
@@ -136,7 +136,7 @@ export function EditLocationDialog({
                   placeholder="e.g. Portland"
                   value={region}
                   onChange={(e) => setRegion(e.target.value)}
-                  maxLength={120}
+                  maxLength={100}
                 />
               </div>
               <div className="space-y-2">
@@ -146,7 +146,7 @@ export function EditLocationDialog({
                   placeholder="e.g. 🇺🇸"
                   value={flag}
                   onChange={(e) => setFlag(e.target.value)}
-                  maxLength={8}
+                  maxLength={10}
                 />
               </div>
             </div>

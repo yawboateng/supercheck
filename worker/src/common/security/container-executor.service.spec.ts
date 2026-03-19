@@ -207,7 +207,7 @@ describe('ContainerExecutorService', () => {
         Buffer.from('console.log("hello world")').toString('base64'),
       );
       expect(script).toContain('/tmp/supercheck/run-123/test.ts');
-      expect(script).toContain('node /tmp/supercheck/run-123/test.ts');
+      expect(script).toContain("'node' '/tmp/supercheck/run-123/test.ts'");
     });
 
     it('rewrites /tmp paths into the execution workspace', () => {
@@ -222,8 +222,25 @@ describe('ContainerExecutorService', () => {
 
       expect(script).toContain("mkdir -p '/tmp/supercheck/run-456/reports'");
       expect(script).toContain("mkdir -p '/tmp/supercheck/run-456/output'");
-      expect(script).toContain('playwright test /tmp/supercheck/run-456/test.ts');
+      expect(script).toContain(
+        "'playwright' 'test' '/tmp/supercheck/run-456/test.ts'",
+      );
       expect(script).not.toContain("'/tmp/test.ts'");
+    });
+
+    it('rewrites embedded /tmp paths in key=value args', () => {
+      const script = service.buildShellScript(
+        {
+          ...defaultOptions,
+          _workspace: '/tmp/supercheck/run-456',
+        } as any,
+        ['k6', 'run', '--out', 'json=/tmp/k6-output/metrics.json', '/tmp/test.js'],
+      );
+
+      expect(script).toContain(
+        "'json=/tmp/supercheck/run-456/k6-output/metrics.json'",
+      );
+      expect(script).not.toContain("'json=/tmp/k6-output/metrics.json'");
     });
 
     it('symlinks node_modules into the workspace', () => {
@@ -238,6 +255,162 @@ describe('ContainerExecutorService', () => {
       expect(script).toContain(
         "ln -s \"$PWD/node_modules\" '/tmp/supercheck/run-789/node_modules'",
       );
+    });
+  });
+
+  describe('job spec building', () => {
+    it('does not hardcode node placement by default', () => {
+      const job = (service as any).buildExecutionJob({
+        jobName: 'sc-exec-test',
+        workspace: '/tmp/supercheck/run-123',
+        shellScript: "echo 'ok'",
+        workingDir: '/worker',
+        limits: {
+          valid: true,
+          memoryLimitMb: 512,
+          cpuLimit: 0.5,
+          timeoutMs: 30000,
+        },
+        options: defaultOptions,
+      });
+
+      expect(job.spec?.template.spec?.runtimeClassName).toBe('gvisor');
+      expect(job.spec?.template.spec?.nodeSelector).toBeUndefined();
+      expect(job.spec?.template.spec?.tolerations).toBeUndefined();
+    });
+
+    it('uses configured runtime class, node selector, and tolerations', () => {
+      const configuredService = new ContainerExecutorService(
+        {
+          get: jest.fn((key: string, defaultValue?: string) => {
+            const config: Record<string, string> = {
+              WORKER_IMAGE: 'ghcr.io/supercheck-io/worker:test',
+              EXECUTION_RUNTIME_CLASS_NAME: 'runsc-sandbox',
+              EXECUTION_NODE_SELECTOR: 'tier=execution,pool=sandbox',
+              EXECUTION_TOLERATIONS_JSON:
+                '[{"key":"dedicated","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]',
+            };
+            return config[key] ?? defaultValue;
+          }),
+        } as any,
+        {
+          isCancelled: jest.fn().mockResolvedValue(false),
+          clearCancellationSignal: jest.fn().mockResolvedValue(undefined),
+        } as any,
+      );
+
+      const job = (configuredService as any).buildExecutionJob({
+        jobName: 'sc-exec-test',
+        workspace: '/tmp/supercheck/run-123',
+        shellScript: "echo 'ok'",
+        workingDir: '/worker',
+        limits: {
+          valid: true,
+          memoryLimitMb: 512,
+          cpuLimit: 0.5,
+          timeoutMs: 30000,
+        },
+        options: defaultOptions,
+      });
+
+      expect(job.spec?.template.spec?.runtimeClassName).toBe('runsc-sandbox');
+      expect(job.spec?.template.spec?.nodeSelector).toEqual({
+        tier: 'execution',
+        pool: 'sandbox',
+      });
+      expect(job.spec?.template.spec?.tolerations).toEqual([
+        {
+          key: 'dedicated',
+          operator: 'Equal',
+          value: 'sandbox',
+          effect: 'NoSchedule',
+        },
+      ]);
+    });
+
+    it('keeps completed pods alive only until signalled or grace expires', () => {
+      const script = (service as any).buildKubernetesWrapperScript(
+        "echo 'done'",
+        '/tmp/supercheck/run-123/.supercheck-exit-code',
+        '/tmp/supercheck/run-123/.supercheck-exit-now',
+      );
+
+      expect(script).toContain(".supercheck-exit-code");
+      expect(script).toContain(".supercheck-exit-now");
+      expect(script).toContain('DEADLINE=$(( $(date +%s) + 300 ))');
+      expect(script).toContain('while [ ! -f');
+      expect(script).not.toContain('while true; do sleep 5; done');
+    });
+
+    it('wrapper exits with the actual exit code, not 0', () => {
+      const script = (service as any).buildKubernetesWrapperScript(
+        "echo 'done'",
+        '/tmp/supercheck/run-123/.supercheck-exit-code',
+        '/tmp/supercheck/run-123/.supercheck-exit-now',
+      );
+
+      expect(script).toContain('exit $EXIT_CODE');
+      expect(script).toContain("trap 'exit $EXIT_CODE' TERM INT");
+      // Must NOT exit 0 unconditionally — that hides real failures when
+      // exec-based exit code polling is unavailable.
+      expect(script).not.toMatch(/exit 0/);
+    });
+
+    it('uses ClusterFirst DNS policy by default', () => {
+      const job = (service as any).buildExecutionJob({
+        jobName: 'sc-exec-dns-test',
+        workspace: '/tmp/supercheck/run-123',
+        shellScript: "echo 'ok'",
+        workingDir: '/worker',
+        limits: {
+          valid: true,
+          memoryLimitMb: 512,
+          cpuLimit: 0.5,
+          timeoutMs: 30000,
+        },
+        options: defaultOptions,
+      });
+
+      expect(job.spec?.template.spec?.dnsPolicy).toBe('ClusterFirst');
+      expect(job.spec?.template.spec?.dnsConfig).toBeUndefined();
+    });
+
+    it('uses dnsPolicy None with custom nameservers when configured', () => {
+      const configuredService = new ContainerExecutorService(
+        {
+          get: jest.fn((key: string, defaultValue?: string) => {
+            const config: Record<string, string> = {
+              WORKER_IMAGE: 'ghcr.io/supercheck-io/worker:test',
+              EXECUTION_DNS_NAMESERVERS: '169.254.20.10,10.43.0.10',
+            };
+            return config[key] ?? defaultValue;
+          }),
+        } as any,
+        {
+          isCancelled: jest.fn().mockResolvedValue(false),
+          clearCancellationSignal: jest.fn().mockResolvedValue(undefined),
+        } as any,
+      );
+
+      const job = (configuredService as any).buildExecutionJob({
+        jobName: 'sc-exec-dns-custom',
+        workspace: '/tmp/supercheck/run-123',
+        shellScript: "echo 'ok'",
+        workingDir: '/worker',
+        limits: {
+          valid: true,
+          memoryLimitMb: 512,
+          cpuLimit: 0.5,
+          timeoutMs: 30000,
+        },
+        options: defaultOptions,
+      });
+
+      expect(job.spec?.template.spec?.dnsPolicy).toBe('None');
+      expect(job.spec?.template.spec?.dnsConfig?.nameservers).toEqual([
+        '169.254.20.10',
+        '10.43.0.10',
+      ]);
     });
   });
 
@@ -258,6 +431,24 @@ describe('ContainerExecutorService', () => {
       expect(onStdoutChunk).toHaveBeenNthCalledWith(1, 'line-1\n');
       expect(onStdoutChunk).toHaveBeenNthCalledWith(2, 'line-3\n');
       expect(collector.getOutput()).toBe('line-1\nline-2\nline-3\n');
+    });
+  });
+
+  describe('waitForExecutionPod', () => {
+    it('returns pod name as soon as the pod exists, even while Pending', async () => {
+      (service as any).coreApi = {
+        listNamespacedPod: jest.fn().mockResolvedValue({
+          items: [
+            {
+              metadata: { name: 'sc-exec-abc123' },
+              status: { phase: 'Pending' },
+            },
+          ],
+        }),
+      };
+
+      const podName = await (service as any).waitForExecutionPod('test-job');
+      expect(podName).toBe('sc-exec-abc123');
     });
   });
 });

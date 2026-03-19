@@ -6,7 +6,7 @@ Self-host Supercheck on your own infrastructure.
 
 [![Deploy on Coolify](https://img.shields.io/badge/Deploy%20on-Coolify-6B16ED?style=for-the-badge&logo=coolify&logoColor=white)](./coolify/README.md)
 
-One-click deployment on [Coolify](https://coolify.io) — the easiest way to self-host.
+Coolify template deployment on [Coolify](https://coolify.io) with host-level K3s + gVisor bootstrap for the execution plane.
 
 ## Docker Compose
 
@@ -17,10 +17,13 @@ git clone https://github.com/supercheck-io/supercheck.git
 cd supercheck/deploy/docker
 
 # Generate secure secrets
-bash init-secrets.sh
+sudo bash init-secrets.sh
+
+# Install local K3s + gVisor for the execution plane
+sudo bash setup-k3s.sh
 
 # Start services
-docker compose up -d
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
 ```
 
 See [docker/README.md](docker/README.md) for detailed configuration options.
@@ -30,8 +33,7 @@ See [docker/README.md](docker/README.md) for detailed configuration options.
 | Platform | Guide |
 |----------|-------|
 | **Coolify** | [Deploy on Coolify](coolify/README.md) |
-| **Dokploy** | [Deploy on Dokploy](dokploy/README.md) |
 
 ## Documentation
 
-Full documentation: **[supercheck.io/docs/deployment](https://supercheck.io/docs/deployment)**
+Full documentation: **[supercheck.io/docs/app/deployment](https://supercheck.io/docs/app/deployment)**

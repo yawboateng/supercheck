@@ -137,6 +137,7 @@ interface ValidatedLimits {
 export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ContainerExecutorService.name);
   private static readonly WORKSPACE_ROOT = '/tmp/supercheck';
+  private static readonly POST_EXECUTION_GRACE_SECONDS = 300;
   private readonly activeCancellationIntervals: Set<NodeJS.Timeout> =
     new Set();
 
@@ -166,6 +167,10 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private static readonly SAFE_FILENAME_RE = /^[\w.\-]+$/;
   private readonly defaultImage: string;
   private readonly executionNamespace: string;
+  private readonly executionRuntimeClassName: string;
+  private readonly executionNodeSelector?: Record<string, string>;
+  private readonly executionTolerations?: k8s.V1Toleration[];
+  private readonly executionDnsNameservers?: string[];
   private k8sModule: typeof import('@kubernetes/client-node') | null = null;
   private kubeConfig: k8s.KubeConfig | null = null;
   private batchApi: k8s.BatchV1Api | null = null;
@@ -173,6 +178,8 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private logClient: k8s.Log | null = null;
   private execClient: k8s.Exec | null = null;
   private readonly runningJobs: Map<string, string> = new Map();
+  /** Track pods that have already logged an exec failure at warn level to avoid log spam. */
+  private readonly execFailureLogged: Set<string> = new Set();
 
   constructor(
     private configService: ConfigService,
@@ -186,6 +193,19 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       'EXECUTION_NAMESPACE',
       'supercheck-execution',
     );
+    this.executionRuntimeClassName =
+      this.configService
+        .get<string>('EXECUTION_RUNTIME_CLASS_NAME', 'gvisor')
+        ?.trim() || 'gvisor';
+    this.executionNodeSelector = this.parseExecutionNodeSelector(
+      this.configService.get<string>('EXECUTION_NODE_SELECTOR'),
+    );
+    this.executionTolerations = this.parseExecutionTolerations(
+      this.configService.get<string>('EXECUTION_TOLERATIONS_JSON'),
+    );
+    this.executionDnsNameservers = this.parseExecutionDnsNameservers(
+      this.configService.get<string>('EXECUTION_DNS_NAMESERVERS'),
+    );
   }
 
   async onModuleInit(): Promise<void> {
@@ -193,6 +213,26 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Container executor initialized');
     this.logger.log(`Execution namespace: ${this.executionNamespace}`);
     this.logger.log(`Default execution image: ${this.defaultImage}`);
+    this.logger.log(
+      `Execution runtimeClassName: ${this.executionRuntimeClassName}`,
+    );
+    if (this.executionNodeSelector) {
+      this.logger.log(
+        `Execution nodeSelector: ${JSON.stringify(this.executionNodeSelector)}`,
+      );
+    }
+    if (this.executionTolerations?.length) {
+      this.logger.log(
+        `Execution tolerations: ${JSON.stringify(this.executionTolerations)}`,
+      );
+    }
+    if (this.executionDnsNameservers?.length) {
+      this.logger.log(
+        `Execution DNS nameservers: ${this.executionDnsNameservers.join(', ')} (dnsPolicy: None)`,
+      );
+    } else {
+      this.logger.log('Execution DNS policy: ClusterFirst (default)');
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -473,6 +513,18 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
+      if (!timedOut && !killed && podName) {
+        await this.signalExecutionExit(podName, workspace).catch((signalError) => {
+          this.logger.debug(
+            `Failed to signal execution pod exit for ${podName}: ${
+              signalError instanceof Error
+                ? signalError.message
+                : String(signalError)
+            }`,
+          );
+        });
+      }
+
       if (logAbort) {
         logAbort.abort();
       }
@@ -526,6 +578,9 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       if (options.runId) {
         this.runningJobs.delete(options.runId);
       }
+      if (podName) {
+        this.execFailureLogged.delete(podName);
+      }
       await this.deleteExecutionJob(jobName);
     }
   }
@@ -549,7 +604,12 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     const resourceMemoryLimit = `${effectiveMemoryMb}Mi`;
     const resourceMemoryRequest = `${Math.max(128, Math.round(effectiveMemoryMb * 0.75))}Mi`;
     const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
-    const wrappedScript = this.buildKubernetesWrapperScript(shellScript, exitCodeFile);
+    const exitSignalFile = this.getWorkspaceExitSignalFile(workspace);
+    const wrappedScript = this.buildKubernetesWrapperScript(
+      shellScript,
+      exitCodeFile,
+      exitSignalFile,
+    );
     const runLabel = this.buildLabelValue(options.runId);
 
     return {
@@ -577,22 +637,37 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
             },
           },
           spec: {
-            runtimeClassName: 'gvisor',
+            runtimeClassName: this.executionRuntimeClassName,
             restartPolicy: 'Never',
             automountServiceAccountToken: false,
             enableServiceLinks: false,
-            nodeSelector: {
-              workload: 'worker',
-            },
             terminationGracePeriodSeconds: 1,
-            tolerations: [
-              {
-                key: 'workload',
-                operator: 'Equal',
-                value: 'worker',
-                effect: 'NoSchedule',
-              },
-            ],
+            nodeSelector: this.executionNodeSelector,
+            tolerations: this.executionTolerations,
+            // DNS configuration: use ClusterFirst (inherits cluster DNS) by
+            // default.  Operators can override with EXECUTION_DNS_NAMESERVERS
+            // to use explicit nameservers (e.g. NodeLocal DNSCache) which
+            // switches to dnsPolicy: None.
+            ...(this.executionDnsNameservers?.length
+              ? {
+                  dnsPolicy: 'None' as const,
+                  dnsConfig: {
+                    nameservers: this.executionDnsNameservers,
+                    searches: [
+                      `${this.executionNamespace}.svc.cluster.local`,
+                      'svc.cluster.local',
+                      'cluster.local',
+                    ],
+                    options: [
+                      { name: 'ndots', value: '1' },
+                      { name: 'timeout', value: '2' },
+                      { name: 'attempts', value: '3' },
+                    ],
+                  },
+                }
+              : {
+                  dnsPolicy: 'ClusterFirst' as const,
+                }),
             securityContext: {
               runAsNonRoot: true,
               runAsUser: 1000,
@@ -664,14 +739,18 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private buildKubernetesWrapperScript(
     shellScript: string,
     exitCodeFile: string,
+    exitSignalFile: string,
   ): string {
     const escapedExitCodeFile = this.escapeShellArg(exitCodeFile);
+    const escapedExitSignalFile = this.escapeShellArg(exitSignalFile);
     return [
       `(${shellScript})`,
       'EXIT_CODE=$?',
       `printf '%s' "$EXIT_CODE" > ${escapedExitCodeFile}`,
-      "trap 'exit 0' TERM INT",
-      'while true; do sleep 5; done',
+      "trap 'exit $EXIT_CODE' TERM INT",
+      `DEADLINE=$(( $(date +%s) + ${ContainerExecutorService.POST_EXECUTION_GRACE_SECONDS} ))`,
+      `while [ ! -f ${escapedExitSignalFile} ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do sleep 1; done`,
+      'exit $EXIT_CODE',
     ].join('; ');
   }
 
@@ -733,6 +812,12 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       });
       const pod = pods.items[0];
       if (pod?.metadata?.name) {
+        // Return as soon as the pod exists (even in Pending phase).
+        // On cold nodes, image pulls for the 3+ GB worker image can take
+        // minutes — blocking here until Running would cause spurious
+        // "did not appear within 120s" failures.
+        // The log stream's reconnect logic handles 400 errors from the
+        // API server while the container is still starting up.
         return pod.metadata.name;
       }
       await this.sleep(1000);
@@ -813,7 +898,11 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   ): AbortController {
     const controller = new AbortController();
     const reconnectDelayMs = 2_000;
-    const maxReconnects = 10;
+    // Allow up to 60 reconnect attempts (~2 min) so that cold-node image
+    // pulls (3+ GB worker image) don't exhaust reconnects before the
+    // container starts.  Once the stream is established the reconnect
+    // counter only matters for mid-stream network blips, which are rare.
+    const maxReconnects = 60;
     const sinceSecondsOnReconnect = 5;
 
     const connect = async (attempt: number) => {
@@ -996,11 +1085,20 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       `if [ -f ${this.escapeShellArg(exitCodeFile)} ]; then cat ${this.escapeShellArg(exitCodeFile)}; fi`,
     ];
     const stdout = await this.execInPod(podName, command).catch((err) => {
-      this.logger.debug(
-        `Exit code read failed for ${podName}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      // Log exec failures at warn level on first occurrence so RBAC / connectivity
+      // problems are immediately visible in production instead of being silently
+      // swallowed at debug level for the entire timeout window.
+      if (!this.execFailureLogged.has(podName)) {
+        this.execFailureLogged.add(podName);
+        this.logger.warn(
+          `Exit code read via exec failed for ${podName} (will retry silently): ${msg}`,
+        );
+      } else {
+        this.logger.debug(
+          `Exit code read failed for ${podName}: ${msg}`,
+        );
+      }
       return '';
     });
     const trimmed = stdout.trim();
@@ -1050,6 +1148,18 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     }
 
     return Buffer.concat(stdoutChunks).toString('utf8');
+  }
+
+  private async signalExecutionExit(
+    podName: string,
+    workspace: string,
+  ): Promise<void> {
+    const exitSignalFile = this.getWorkspaceExitSignalFile(workspace);
+    await this.execInPod(podName, [
+      '/bin/sh',
+      '-c',
+      `touch ${this.escapeShellArg(exitSignalFile)}`,
+    ]);
   }
 
   private async extractPodArtifacts(
@@ -1185,6 +1295,10 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     return `${workspace}/.supercheck-exit-code`;
   }
 
+  private getWorkspaceExitSignalFile(workspace: string): string {
+    return `${workspace}/.supercheck-exit-now`;
+  }
+
   private rewriteTmpPath(value: string, workspace: string): string {
     if (value.startsWith('/tmp/')) {
       return `${workspace}/${value.slice(5)}`;
@@ -1281,6 +1395,122 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  private parseExecutionNodeSelector(
+    rawValue?: string,
+  ): Record<string, string> | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+          throw new Error('value must be a JSON object');
+        }
+
+        const selector = Object.fromEntries(
+          Object.entries(parsed).flatMap(([key, value]) => {
+            if (!key.trim() || typeof value !== 'string' || !value.trim()) {
+              return [];
+            }
+            return [[key.trim(), value.trim()]];
+          }),
+        );
+
+        return Object.keys(selector).length > 0 ? selector : undefined;
+      } catch (error) {
+        this.logger.warn(
+          `Invalid EXECUTION_NODE_SELECTOR value; ignoring custom selector: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return undefined;
+      }
+    }
+
+    const selector: Record<string, string> = {};
+    for (const rawPair of trimmed.split(',')) {
+      const [rawKey, ...rawValueParts] = rawPair.split('=');
+      const key = rawKey?.trim();
+      const value = rawValueParts.join('=').trim();
+      if (!key || !value) {
+        this.logger.warn(
+          'Invalid EXECUTION_NODE_SELECTOR value; expected key=value pairs',
+        );
+        return undefined;
+      }
+      selector[key] = value;
+    }
+
+    return Object.keys(selector).length > 0 ? selector : undefined;
+  }
+
+  private parseExecutionTolerations(
+    rawValue?: string,
+  ): k8s.V1Toleration[] | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!Array.isArray(parsed)) {
+        throw new Error('value must be a JSON array');
+      }
+
+      const tolerations = parsed.filter(
+        (item): item is k8s.V1Toleration =>
+          !!item && typeof item === 'object' && !Array.isArray(item),
+      );
+
+      return tolerations.length > 0 ? tolerations : undefined;
+    } catch (error) {
+      this.logger.warn(
+        `Invalid EXECUTION_TOLERATIONS_JSON value; ignoring custom tolerations: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Parses EXECUTION_DNS_NAMESERVERS into a list of IP addresses.
+   * Accepts a comma-separated string of nameserver IPs.
+   * Example: "169.254.20.10,10.43.0.10"
+   *
+   * When set, execution pods use dnsPolicy: None with these explicit
+   * nameservers. When not set, pods use the default ClusterFirst policy.
+   */
+  private parseExecutionDnsNameservers(
+    rawValue?: string,
+  ): string[] | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    const ipv4Re = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const nameservers = trimmed
+      .split(',')
+      .map((ns) => ns.trim())
+      .filter((ns) => {
+        if (!ns) return false;
+        if (!ipv4Re.test(ns)) {
+          this.logger.warn(
+            `Invalid nameserver IP in EXECUTION_DNS_NAMESERVERS: "${ns}"; skipping`,
+          );
+          return false;
+        }
+        return true;
+      });
+
+    return nameservers.length > 0 ? nameservers : undefined;
+  }
+
   // =====================================================================
   //  Shell script builder
   // =====================================================================
@@ -1365,22 +1595,23 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     // workspace-scoped path so callers that pass /tmp/ paths still work.
     const adjustedCommand = command.map((arg) => {
       if (arg === options.inlineScriptFileName) return scriptPath;
+      if (!options._workspace) return arg;
       // Rewrite /tmp/ prefixed paths to the per-run workspace
-      if (arg.startsWith('/tmp/') && options._workspace) {
+      if (arg.startsWith('/tmp/')) {
         return `${ws}/${arg.slice(5)}`;
       }
-      if (arg === '/tmp/' && options._workspace) {
+      if (arg === '/tmp/' || arg === '/tmp') {
         return `${ws}/`;
+      }
+      // Rewrite embedded /tmp/ paths in key=value style args (e.g. json=/tmp/k6-output/metrics.json)
+      const eqIdx = arg.indexOf('=/tmp/');
+      if (eqIdx !== -1) {
+        return `${arg.slice(0, eqIdx + 1)}${ws}/${arg.slice(eqIdx + 6)}`;
       }
       return arg;
     });
     const quotedCommand = adjustedCommand
-      .map((arg) => {
-        if (/[\s|&;<>()$`"'\\]/.test(arg)) {
-          return `'${arg.replace(/'/g, "'\\''")}'`;
-        }
-        return arg;
-      })
+      .map((arg) => this.escapeShellArg(arg))
       .join(' ');
     shellCommands.push(quotedCommand);
 

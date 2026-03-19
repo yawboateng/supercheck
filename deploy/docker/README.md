@@ -84,7 +84,7 @@ OAuth (`GITHUB_*` / `GOOGLE_*`) is optional in self-hosted mode.
 | `WORKER_REPLICAS` | Number of worker containers (worker-side scaling knob) | `1` |
 | `RUNNING_CAPACITY` | App-side gate: max concurrent test runs (set equal to `WORKER_REPLICAS`) | `1` |
 | `QUEUED_CAPACITY` | App-side gate: max queued test runs before new submissions are rejected | `10` |
-| `WORKER_LOCATION` | Worker queue mode (`local`, `us-east`, `eu-central`, `asia-pacific`) | `local` |
+| `WORKER_LOCATION` | Worker queue mode (`local` for single-server self-hosted, or any enabled Super Admin location code) | `local` |
 
 ---
 
@@ -117,7 +117,7 @@ For production self-hosted installs, use the K3s bootstrap:
 sudo bash setup-k3s.sh
 ```
 
-This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, applies the execution `ResourceQuota` and `NetworkPolicy`, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
+This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, applies the execution `LimitRange`, `ResourceQuota`, and `NetworkPolicy`, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
 
 > **Linux host recommended:** self-hosted execution should use Docker Engine on Linux plus local K3s. Docker Desktop adds an extra VM layer and is not the supported production target.
 
@@ -137,4 +137,4 @@ docker compose exec -T postgres psql -U postgres supercheck < backup.sql
 
 ## Documentation
 
-Full documentation: **[supercheck.io/docs/deployment](https://supercheck.io/docs/deployment)**
+Full documentation: **[supercheck.io/docs/app/deployment](https://supercheck.io/docs/app/deployment)**

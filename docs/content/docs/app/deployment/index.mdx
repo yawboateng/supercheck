@@ -10,7 +10,11 @@ Deploy Supercheck on your own infrastructure. Self-hosted mode includes **unlimi
 
 [![Deploy on Coolify](https://img.shields.io/badge/Deploy%20on-Coolify-6B16ED?style=for-the-badge&logo=coolify&logoColor=white)](https://github.com/supercheck-io/supercheck/blob/main/deploy/coolify/README.md)
 
-One-click deployment on [Coolify](https://coolify.io) — the recommended way to get started.
+Coolify template deployment for Linux hosts. Production still requires running `setup-k3s.sh` on the host so the worker can launch gVisor execution Jobs.
+
+<Callout type="warn">
+Self-hosted production uses Docker Compose for the long-lived services and local K3s + gVisor for the execution plane. It is not a pure Docker-only deployment anymore.
+</Callout>
 
 ## Docker Compose
 
@@ -34,6 +38,8 @@ One-click deployment on [Coolify](https://coolify.io) — the recommended way to
 | Requirement | Minimum |
 |-------------|---------|
 | Docker Engine | 20.10+ |
+| Linux host | Required for supported production execution |
+| Execution plane | Local K3s + gVisor via `setup-k3s.sh` |
 | CPU | 4 vCPU |
 | Memory | 8GB RAM |
 | Storage | 50GB |
