@@ -107,7 +107,7 @@ For single-server deployments, keep `WORKER_LOCATION=local` so one worker proces
 
 Production self-hosted deployments now use the same execution model as cloud: the worker always creates per-run Jobs in the local `supercheck-execution` namespace. Those Jobs use `runtimeClassName: gvisor`, so Playwright and k6 always execute under gVisor regardless of whether you are self-hosting or running in cloud Kubernetes.
 
-The Docker worker container still runs with `runtime: runsc`, but it is only the control plane. Untrusted code no longer executes inside the long-lived worker container in any supported Compose deployment.
+The Docker worker container runs as a standard Docker container (no special runtime). It is only the control plane — untrusted code executes exclusively inside gVisor-sandboxed Kubernetes execution Jobs, never inside the long-lived worker container.
 
 ### Installation
 
@@ -117,7 +117,7 @@ For production self-hosted installs, use the K3s bootstrap:
 sudo bash setup-k3s.sh
 ```
 
-This installs K3s, installs gVisor, registers `runsc` for Docker Compose workers, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
+This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
 
 > **Linux host recommended:** self-hosted execution should use Docker Engine on Linux plus local K3s. Docker Desktop adds an extra VM layer and is not the supported production target.
 

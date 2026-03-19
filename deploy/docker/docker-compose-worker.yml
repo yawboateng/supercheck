@@ -55,9 +55,6 @@ services:
     init: true
     # GVISOR-006: Run as non-root user (pwuser UID 1000 from Playwright image)
     user: "1000:1000"
-    # gVisor sandbox for the worker control plane.
-    # Actual Playwright/k6 execution uses per-run Kubernetes Jobs under gVisor.
-    runtime: runsc
     # GVISOR-006: Read-only root filesystem with writable tmpfs mounts
     read_only: true
     tmpfs:

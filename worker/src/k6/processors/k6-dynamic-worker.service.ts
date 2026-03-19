@@ -34,6 +34,7 @@ export class K6DynamicWorkerService implements OnModuleInit, OnModuleDestroy {
   private connection: Redis | null = null;
   private subscriber: Redis | null = null;
   private workerLocation = 'local';
+  private discoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     @Inject(forwardRef(() => K6ExecutionProcessor))
@@ -77,6 +78,11 @@ export class K6DynamicWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.discoveryRetryTimer) {
+      clearTimeout(this.discoveryRetryTimer);
+      this.discoveryRetryTimer = null;
+    }
+
     if (this.subscriber) {
       await this.subscriber
         .unsubscribe('supercheck:queue-refresh')
@@ -242,43 +248,62 @@ export class K6DynamicWorkerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Schedule a delayed re-discovery attempt.
+   * Schedule a delayed re-discovery attempt with exponential backoff.
    * Covers transient DB/Redis failures during startup: the worker starts with
    * only the local fallback queue but should pick up the real location queues
    * once infrastructure recovers.
+   *
+   * Uses exponential backoff (30s, 60s, 120s, …) capped at 5 minutes.
+   * Stops retrying once a refresh discovers new queues (the pub/sub
+   * listener handles further changes). The timer is stored so it can
+   * be cancelled in onModuleDestroy().
    */
   private scheduleDiscoveryRetry(): void {
-    const RETRY_DELAY_MS = 30_000;
-    const MAX_RETRIES = 5;
+    const BASE_DELAY_MS = 30_000;
+    const MAX_DELAY_MS = 5 * 60_000; // 5 minutes cap
+    const MAX_STABLE_RETRIES = 3; // stop after N consecutive no-growth attempts
     let retries = 0;
-    const prevSize = this.activeQueueNames.size;
+    let stableRetries = 0;
+
+    const nextDelay = () =>
+      Math.min(BASE_DELAY_MS * Math.pow(2, retries), MAX_DELAY_MS);
 
     const attempt = () => {
       retries++;
+      const prevSize = this.activeQueueNames.size;
       this.logger.log(
-        `Discovery retry ${retries}/${MAX_RETRIES}: re-scanning for regional K6 queues (active: ${this.activeQueueNames.size})…`,
+        `Discovery retry ${retries}: re-scanning for regional K6 queues (active: ${this.activeQueueNames.size})…`,
       );
       this.handleQueueRefresh()
         .then(() => {
-          // Stop retrying once we've registered at least one new queue
-          // or we've exhausted our retries.
           const grew = this.activeQueueNames.size > prevSize;
-          if (!grew && retries < MAX_RETRIES) {
-            setTimeout(attempt, RETRY_DELAY_MS);
-          } else if (grew) {
+          if (grew) {
             this.logger.log(
               `Discovery retry succeeded: now have ${this.activeQueueNames.size} K6 queue(s)`,
             );
+            // Reset stable counter on growth — more queues may still appear
+            stableRetries = 0;
+            this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
+          } else {
+            stableRetries++;
+            if (stableRetries >= MAX_STABLE_RETRIES) {
+              this.logger.log(
+                `Discovery retry: queue set stable for ${stableRetries} consecutive checks. ` +
+                `Stopping retry loop (${this.activeQueueNames.size} K6 queue(s)). ` +
+                `Pub/sub listener will handle further changes.`,
+              );
+              this.discoveryRetryTimer = null;
+              return;
+            }
+            this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
           }
         })
         .catch(() => {
-          if (retries < MAX_RETRIES) {
-            setTimeout(attempt, RETRY_DELAY_MS);
-          }
+          this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
         });
     };
 
-    setTimeout(attempt, RETRY_DELAY_MS);
+    this.discoveryRetryTimer = setTimeout(attempt, BASE_DELAY_MS);
   }
 
   /**

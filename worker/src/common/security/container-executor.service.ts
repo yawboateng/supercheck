@@ -146,6 +146,22 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   /** Max artifact tar archive size in bytes (100 MB) */
   private static readonly MAX_ARTIFACT_ARCHIVE_BYTES = 100 * 1024 * 1024;
 
+  /**
+   * Memory overhead added to the pod memory limit to account for:
+   * - gVisor Sentry process (~100 MB)
+   * - /dev/shm tmpfs counts against cgroup memory in K8s (unlike Docker --shm-size)
+   *
+   * In Docker, --memory and --shm-size are independent limits.
+   * In Kubernetes, emptyDir with medium: Memory counts against the container's
+   * cgroup memory limit.  Without this headroom, tests that used close to the
+   * Docker memory ceiling will OOM under K8s/gVisor.
+   */
+  private static readonly SHM_SIZE_MB = 512;
+  private static readonly GVISOR_SENTRY_OVERHEAD_MB = 150;
+  private static readonly TOTAL_MEMORY_OVERHEAD_MB =
+    ContainerExecutorService.SHM_SIZE_MB +
+    ContainerExecutorService.GVISOR_SENTRY_OVERHEAD_MB;
+
   /** Allowed filename pattern: alphanumeric, dots, hyphens, underscores */
   private static readonly SAFE_FILENAME_RE = /^[\w.\-]+$/;
   private readonly defaultImage: string;
@@ -430,24 +446,11 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
 
       podName = await this.waitForExecutionPod(jobName);
 
-      try {
-        logAbort = await this.logClient!.log(
-          this.executionNamespace,
-          podName,
-          'execution',
-          logCollector.stream,
-          {
-            follow: true,
-            timestamps: false,
-          },
-        );
-      } catch (error) {
-        this.logger.warn(
-          `Failed to start live log streaming for ${jobName}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+      logAbort = this.startLogStreamWithReconnect(
+        podName,
+        logCollector.stream,
+        jobName,
+      );
 
       const outcome = await this.waitForExecutionOutcome(
         podName,
@@ -483,9 +486,9 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       }
 
       const duration = Date.now() - startTime;
-      const exitCode =
-        outcome.exitCode ??
-        (timedOut ? 124 : killed ? 137 : 1);
+      const exitCode = killed
+        ? 137
+        : (outcome.exitCode ?? (timedOut ? 124 : 1));
 
       return {
         success: exitCode === 0 && !timedOut && !killed,
@@ -541,8 +544,10 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     const deadlineSeconds = Math.ceil((limits.timeoutMs + 120_000) / 1000);
     const resourceCpuLimit = `${Math.max(100, Math.round(limits.cpuLimit * 1000))}m`;
     const resourceCpuRequest = `${Math.max(100, Math.round(limits.cpuLimit * 500))}m`;
-    const resourceMemoryLimit = `${limits.memoryLimitMb}Mi`;
-    const resourceMemoryRequest = `${Math.max(128, Math.round(limits.memoryLimitMb * 0.75))}Mi`;
+    // Add overhead for /dev/shm tmpfs (counts against cgroup in K8s) and gVisor Sentry
+    const effectiveMemoryMb = limits.memoryLimitMb + ContainerExecutorService.TOTAL_MEMORY_OVERHEAD_MB;
+    const resourceMemoryLimit = `${effectiveMemoryMb}Mi`;
+    const resourceMemoryRequest = `${Math.max(128, Math.round(effectiveMemoryMb * 0.75))}Mi`;
     const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
     const wrappedScript = this.buildKubernetesWrapperScript(shellScript, exitCodeFile);
     const runLabel = this.buildLabelValue(options.runId);
@@ -579,6 +584,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
             nodeSelector: {
               workload: 'worker',
             },
+            terminationGracePeriodSeconds: 1,
             tolerations: [
               {
                 key: 'workload',
@@ -645,7 +651,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
                 name: 'dshm',
                 emptyDir: {
                   medium: 'Memory',
-                  sizeLimit: '512Mi',
+                  sizeLimit: `${ContainerExecutorService.SHM_SIZE_MB}Mi`,
                 },
               },
             ],
@@ -738,15 +744,21 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private createLogCollector(options: ContainerExecutionOptions): {
     stream: Writable;
     getOutput: () => string;
+    suppressLiveForwarding: () => void;
+    resumeLiveForwarding: () => void;
   } {
     let output = '';
+    let suppressLive = false;
     const stream = new Writable({
       write: (chunk, _encoding, callback) => {
         const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
         if (output.length < ContainerExecutorService.MAX_OUTPUT_BYTES) {
           output += text;
         }
-        if (options.onStdoutChunk) {
+        // Skip forwarding during reconnect replay to avoid duplicating
+        // lines in the live console. The buffer still accumulates for the
+        // final snapshot (which replaces it anyway).
+        if (!suppressLive && options.onStdoutChunk) {
           try {
             void options.onStdoutChunk(text);
           } catch {
@@ -760,7 +772,117 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     return {
       stream,
       getOutput: () => output,
+      suppressLiveForwarding: () => { suppressLive = true; },
+      resumeLiveForwarding: () => { suppressLive = false; },
     };
+  }
+
+  /**
+   * Start log streaming with automatic reconnect on network errors.
+   *
+   * K8s log follow streams can disconnect prematurely due to API server
+   * timeouts, load-balancer idle timeouts, or transient network blips.
+   * When the stream drops, we wait briefly and reconnect using
+   * `sinceSeconds` so the API server resumes from roughly where we left
+   * off (duplicates are harmless — the collector appends to the same
+   * buffer and the final snapshot replaces it anyway).
+   *
+   * Completion is determined by `waitForExecutionOutcome()` (exit-code
+   * file polling), NOT by the log stream lifecycle.
+   *
+   * On reconnect, `sinceSeconds: 5` replays the last few seconds to
+   * avoid gaps. The collector's live-forwarding is suppressed during
+   * the replay window so duplicate lines are not published to the
+   * live console via `onStdoutChunk`.
+   */
+  private startLogStreamWithReconnect(
+    podName: string,
+    sink: Writable & { suppressLiveForwarding?: () => void; resumeLiveForwarding?: () => void },
+    jobName: string,
+  ): AbortController {
+    const controller = new AbortController();
+    const reconnectDelayMs = 2_000;
+    const maxReconnects = 10;
+    const sinceSecondsOnReconnect = 5;
+
+    const connect = async (attempt: number) => {
+      if (controller.signal.aborted) return;
+
+      // On reconnect, suppress live forwarding for the replay window
+      // to prevent duplicating lines in the user-visible streaming output.
+      let replayTimer: ReturnType<typeof setTimeout> | null = null;
+      if (attempt > 0 && sink.suppressLiveForwarding) {
+        sink.suppressLiveForwarding();
+        // Resume after the replay window (sinceSeconds + reconnect delay buffer)
+        replayTimer = setTimeout(() => {
+          sink.resumeLiveForwarding?.();
+          replayTimer = null;
+        }, (sinceSecondsOnReconnect + 1) * 1_000);
+      }
+
+      try {
+        const abort = await this.logClient!.log(
+          this.executionNamespace,
+          podName,
+          'execution',
+          sink,
+          {
+            follow: true,
+            timestamps: false,
+            ...(attempt > 0 ? { sinceSeconds: sinceSecondsOnReconnect } : {}),
+          },
+        );
+
+        // When the outer controller is aborted, also abort the active stream.
+        const onAbort = () => abort.abort();
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+
+        // Listen for the underlying response closing unexpectedly.
+        // The K8s client resolves the log call immediately once the
+        // stream is established; the actual data flows via piping.
+        // We detect disconnects through the response's 'close' / 'error'
+        // events surfacing on the underlying socket, which k8s client-node
+        // propagates by aborting its own internal controller.
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            controller.signal.removeEventListener('abort', onAbort);
+            if (replayTimer) {
+              clearTimeout(replayTimer);
+              sink.resumeLiveForwarding?.();
+            }
+            if (!controller.signal.aborted && attempt < maxReconnects) {
+              this.logger.warn(
+                `Log stream for ${jobName} disconnected (attempt ${attempt + 1}/${maxReconnects}), reconnecting in ${reconnectDelayMs}ms`,
+              );
+              setTimeout(() => connect(attempt + 1), reconnectDelayMs);
+            }
+          },
+          { once: true },
+        );
+      } catch (error) {
+        if (replayTimer) {
+          clearTimeout(replayTimer);
+          sink.resumeLiveForwarding?.();
+        }
+        if (controller.signal.aborted) return;
+        if (attempt < maxReconnects) {
+          this.logger.warn(
+            `Failed to start log stream for ${jobName} (attempt ${attempt + 1}/${maxReconnects}): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          setTimeout(() => connect(attempt + 1), reconnectDelayMs);
+        } else {
+          this.logger.warn(
+            `Exhausted log stream reconnect attempts for ${jobName}; final logs will be fetched via snapshot`,
+          );
+        }
+      }
+    };
+
+    void connect(0);
+    return controller;
   }
 
   private async fetchPodLogsSnapshot(podName: string): Promise<string> {

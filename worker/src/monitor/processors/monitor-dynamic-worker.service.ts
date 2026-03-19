@@ -16,7 +16,8 @@ import {
 } from '../monitor.constants';
 import { HeartbeatService } from '../../common/heartbeat/heartbeat.service';
 import { DbService } from '../../db/db.service';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
+import * as schema from '../../db/schema';
 
 /**
  * Dynamically creates BullMQ Workers for regional monitor queues.
@@ -37,6 +38,7 @@ export class MonitorDynamicWorkerService
   private connection: Redis | null = null;
   private subscriber: Redis | null = null;
   private workerLocation = 'local';
+  private discoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly monitorService: MonitorService,
@@ -77,6 +79,11 @@ export class MonitorDynamicWorkerService
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.discoveryRetryTimer) {
+      clearTimeout(this.discoveryRetryTimer);
+      this.discoveryRetryTimer = null;
+    }
+
     if (this.subscriber) {
       await this.subscriber
         .unsubscribe('supercheck:queue-refresh')
@@ -129,6 +136,21 @@ export class MonitorDynamicWorkerService
         `[${queueName}] monitor job ${job?.id || 'unknown'} failed: ${error.message}`,
         error.stack,
       );
+
+      // When the job has exhausted all retries and is part of a distributed
+      // execution group, generate an error MonitorResult so the aggregation
+      // gate (Redis SCARD vs expectedLocations.length) can still complete.
+      // Without this, one failed location would stall aggregation for the
+      // entire execution cycle.
+      if (job?.data && this.isFinalFailure(job)) {
+        this.handleFinalJobFailure(job as Job<MonitorJobDataDto>, error).catch(
+          (err) => {
+            this.logger.error(
+              `[${queueName}] failed to record error result for job ${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          },
+        );
+      }
     });
 
     worker.on('error', (error: Error) => {
@@ -242,43 +264,62 @@ export class MonitorDynamicWorkerService
   }
 
   /**
-   * Schedule a delayed re-discovery attempt.
+   * Schedule a delayed re-discovery attempt with exponential backoff.
    * Covers transient DB/Redis failures during startup: the worker starts with
    * only the local fallback queue but should pick up the real location queues
    * once infrastructure recovers.
+   *
+   * Uses exponential backoff (30s, 60s, 120s, …) capped at 5 minutes.
+   * Stops retrying once a refresh discovers new queues (the pub/sub
+   * listener handles further changes). The timer is stored so it can
+   * be cancelled in onModuleDestroy().
    */
   private scheduleDiscoveryRetry(): void {
-    const RETRY_DELAY_MS = 30_000;
-    const MAX_RETRIES = 5;
+    const BASE_DELAY_MS = 30_000;
+    const MAX_DELAY_MS = 5 * 60_000; // 5 minutes cap
+    const MAX_STABLE_RETRIES = 3; // stop after N consecutive no-growth attempts
     let retries = 0;
-    const prevSize = this.activeQueueNames.size;
+    let stableRetries = 0;
+
+    const nextDelay = () =>
+      Math.min(BASE_DELAY_MS * Math.pow(2, retries), MAX_DELAY_MS);
 
     const attempt = () => {
       retries++;
+      const prevSize = this.activeQueueNames.size;
       this.logger.log(
-        `Discovery retry ${retries}/${MAX_RETRIES}: re-scanning for regional monitor queues (active: ${this.activeQueueNames.size})…`,
+        `Discovery retry ${retries}: re-scanning for regional monitor queues (active: ${this.activeQueueNames.size})…`,
       );
       this.handleQueueRefresh()
         .then(() => {
-          // Stop retrying once we've registered at least one new queue
-          // or we've exhausted our retries.
           const grew = this.activeQueueNames.size > prevSize;
-          if (!grew && retries < MAX_RETRIES) {
-            setTimeout(attempt, RETRY_DELAY_MS);
-          } else if (grew) {
+          if (grew) {
             this.logger.log(
               `Discovery retry succeeded: now have ${this.activeQueueNames.size} monitor queue(s)`,
             );
+            // Reset stable counter on growth — more queues may still appear
+            stableRetries = 0;
+            this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
+          } else {
+            stableRetries++;
+            if (stableRetries >= MAX_STABLE_RETRIES) {
+              this.logger.log(
+                `Discovery retry: queue set stable for ${stableRetries} consecutive checks. ` +
+                `Stopping retry loop (${this.activeQueueNames.size} monitor queue(s)). ` +
+                `Pub/sub listener will handle further changes.`,
+              );
+              this.discoveryRetryTimer = null;
+              return;
+            }
+            this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
           }
         })
         .catch(() => {
-          if (retries < MAX_RETRIES) {
-            setTimeout(attempt, RETRY_DELAY_MS);
-          }
+          this.discoveryRetryTimer = setTimeout(attempt, nextDelay());
         });
     };
 
-    setTimeout(attempt, RETRY_DELAY_MS);
+    this.discoveryRetryTimer = setTimeout(attempt, BASE_DELAY_MS);
   }
 
   private async processJob(
@@ -309,6 +350,70 @@ export class MonitorDynamicWorkerService
 
     // Legacy/single queue mode
     return this.monitorService.executeMonitorWithLocations(job.data);
+  }
+
+  /**
+   * Check whether a BullMQ job failure is the final attempt (all retries exhausted).
+   */
+  private isFinalFailure(job: Job): boolean {
+    const maxAttempts = job.opts?.attempts ?? 1;
+    return job.attemptsMade >= maxAttempts;
+  }
+
+  /**
+   * Generate an error MonitorResult for a job that failed after all retries.
+   * This ensures the distributed aggregation gate can still complete —
+   * without it, the Redis SCARD never reaches expectedLocations.length
+   * and the aggregation stalls until the TTL expires.
+   *
+   * If processJob() already persisted a real result (e.g. the probe
+   * succeeded but saveDistributedMonitorResult threw during Redis
+   * coordination), we skip writing a synthetic error to avoid
+   * overwriting a valid result.
+   */
+  private async handleFinalJobFailure(
+    job: Job<MonitorJobDataDto>,
+    error: Error,
+  ): Promise<void> {
+    const { executionGroupId, executionLocation, expectedLocations, monitorId } =
+      job.data;
+
+    if (!executionGroupId || !executionLocation) return;
+
+    // Check whether a real result for this location + execution group
+    // was already persisted by processJob() before it threw.
+    const existing = await this.dbService.db.query.monitorResults.findFirst({
+      where: and(
+        eq(schema.monitorResults.monitorId, monitorId),
+        eq(schema.monitorResults.executionGroupId, executionGroupId),
+        eq(schema.monitorResults.location, executionLocation),
+      ),
+      columns: { id: true },
+    });
+
+    if (existing) {
+      this.logger.log(
+        `Skipping synthetic error for ${monitorId}/${executionLocation}: ` +
+        `real result already persisted (executionGroupId=${executionGroupId})`,
+      );
+      return;
+    }
+
+    const errorResult: MonitorExecutionResult = {
+      monitorId,
+      location: executionLocation,
+      status: 'error',
+      checkedAt: new Date(),
+      isUp: false,
+      details: {
+        errorMessage: `Worker execution failed after ${job.attemptsMade} attempt(s): ${error.message}`,
+      },
+    };
+
+    await this.monitorService.saveDistributedMonitorResult(errorResult, {
+      executionGroupId,
+      expectedLocations,
+    });
   }
 
   /**

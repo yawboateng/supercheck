@@ -141,19 +141,6 @@ else
   log "gVisor installed: $(runsc --version 2>&1 | head -1)"
 fi
 
-# ─── Step 2b: Register runsc as a Docker runtime ─────────────────────────────
-
-if command -v docker &>/dev/null; then
-  if docker info 2>/dev/null | grep -q "runsc"; then
-    warn "Docker already has runsc runtime configured, skipping"
-  else
-    log "Registering runsc as a Docker runtime for Compose workers..."
-    runsc install
-    systemctl restart docker
-    log "Docker runtime runsc registered successfully"
-  fi
-fi
-
 # ─── Step 3: Configure containerd for gVisor ─────────────────────────────────
 
 CONTAINERD_CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
@@ -166,11 +153,52 @@ if [[ -f "$CONTAINERD_TEMPLATE" ]] && grep -q "runsc" "$CONTAINERD_TEMPLATE"; th
 else
   log "Configuring containerd to use gVisor runtime..."
 
+  # IMPORTANT: config.toml.tmpl REPLACES the entire default K3s containerd
+  # config.  It must carry every setting K3s needs (root, state, snapshotter,
+  # CNI, registry mirror path, default runc runtime, etc.) plus the runsc
+  # runtime definition.  A minimal template that only defines runsc will
+  # silently drop snapshotter, registry mirrors, and other critical defaults,
+  # causing hard-to-debug failures (see GVISOR_MIGRATION bug #4).
+  #
+  # The shim binary is installed to /usr/local/bin.  To ensure containerd
+  # discovers it regardless of its own PATH, we also symlink it into /usr/bin.
+  if [[ -f /usr/local/bin/containerd-shim-runsc-v1 ]] && [[ ! -e /usr/bin/containerd-shim-runsc-v1 ]]; then
+    ln -s /usr/local/bin/containerd-shim-runsc-v1 /usr/bin/containerd-shim-runsc-v1
+  fi
+
   cat > "$CONTAINERD_TEMPLATE" << 'TOML'
-# K3s containerd configuration with gVisor runtime
-# This is a template - K3s will merge it with defaults
+# K3s containerd configuration — comprehensive template with gVisor runtime.
+# This file replaces the default K3s containerd config; every required
+# section must be present.
 
 version = 2
+
+[plugins."io.containerd.internal.v1.opt"]
+  path = "/var/lib/rancher/k3s/agent/containerd"
+
+[plugins."io.containerd.grpc.v1.cri"]
+  stream_server_address = "127.0.0.1"
+  stream_server_port = "10010"
+  enable_selinux = false
+  enable_unprivileged_ports = true
+  enable_unprivileged_icmp = true
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  snapshotter = "overlayfs"
+  disable_snapshot_annotations = true
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+  SystemdCgroup = true
+
+[plugins."io.containerd.grpc.v1.cri".cni]
+  bin_dir = "/var/lib/rancher/k3s/data/cni"
+  conf_dir = "/var/lib/rancher/k3s/agent/etc/cni/net.d"
+
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/var/lib/rancher/k3s/agent/etc/containerd/certs.d"
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"

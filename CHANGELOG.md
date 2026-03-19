@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 - Fixed email notification test connection only sending to the first email address when multiple addresses are configured ([#269](https://github.com/supercheck-io/supercheck/issues/269))
+- Fixed monitor distributed execution writing a synthetic error result even when a real result was already persisted — a transient Redis/DB failure during coordination could overwrite a successful probe with `status: 'error'`, incorrectly marking the monitor as down
+- Fixed scheduler-level monitor outages bypassing alert evaluation — when all monitor queues are unavailable, `recordSchedulingFailure()` now writes a `monitor_results` row with consecutive failure tracking so alert thresholds increment correctly and notifications fire when workers recover
+- Fixed live log output duplication during Kubernetes log stream reconnects — `sinceSeconds: 5` replayed recent output into `onStdoutChunk`, causing duplicate lines in the user-visible streaming console. Live forwarding is now suppressed during the replay window
+- Fixed discovery retry loop in K6 and monitor dynamic worker services running indefinitely even after queue discovery stabilises — the loop now stops after 3 consecutive no-growth checks and the timeout handle is properly cleared in `onModuleDestroy()`
 - Fixed mid-run cancellations being recorded as generic failures instead of cancellations when the cancellation poller deletes the execution pod before `waitForExecutionOutcome` can read pod status
 - Fixed K6 run submissions being rejected with "No active worker" during the 30-second heartbeat refresh window after a worker starts consuming a new queue
 - Fixed `/api/locations/available` returning 500 when Redis heartbeat scan fails — the endpoint now gracefully degrades by marking all locations as offline instead of failing the entire response

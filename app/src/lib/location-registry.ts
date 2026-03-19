@@ -122,12 +122,19 @@ export async function getEnabledLocations(): Promise<Location[]> {
   return (await ensureCache()).allEnabled;
 }
 
-/** Get all locations (including disabled). Super Admin use only. Uncached. */
+/**
+ * Get all locations (including disabled). Super Admin use only. Uncached.
+ *
+ * In cloud mode, the "local" location is filtered out because it is only
+ * meaningful for self-hosted deployments. This prevents it from appearing
+ * in the Super Admin Locations table in cloud-hosted mode.
+ */
 export async function getAllLocations(): Promise<Location[]> {
-  return db
+  const all = await db
     .select()
     .from(locations)
     .orderBy(asc(locations.sortOrder), asc(locations.createdAt));
+  return filterLocal(all);
 }
 
 /**

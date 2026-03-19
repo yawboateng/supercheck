@@ -10,6 +10,9 @@ import { Job } from 'bullmq';
 import crypto from 'crypto';
 import { getQueues, queueLogger } from '@/lib/queue';
 import type { LocationConfig, MonitorConfig, MonitoringLocation } from '@/db/schema';
+import { monitors, monitorResults } from '@/db/schema';
+import { db } from '@/utils/db';
+import { and, desc, eq } from 'drizzle-orm';
 import { EXECUTE_MONITOR_JOB_NAME } from './constants';
 import { getDefaultLocationCodes, getAllEnabledLocationCodes, getFirstDefaultLocationCode, getProjectAvailableLocationCodes, hasProjectLocationRestrictions } from '@/lib/location-registry';
 
@@ -128,7 +131,18 @@ export async function processScheduledMonitor(
   const executionJobData = data.jobData ?? data;
   const retryLimit = data.retryLimit || 3;
 
-  await enqueueMonitorExecutionJobs(executionJobData, retryLimit);
+  try {
+    await enqueueMonitorExecutionJobs(executionJobData, retryLimit);
+  } catch (error) {
+    // When enqueue fails because no workers are available, generate a failed
+    // MonitorResult so the monitor's status reflects reality instead of
+    // falsely remaining "UP" indefinitely.
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes('no jobs enqueued') || errorMessage.includes('none of the expected locations')) {
+      await recordSchedulingFailure(executionJobData.monitorId, errorMessage);
+    }
+    throw error; // Re-throw so BullMQ marks the scheduler job as failed
+  }
 
   return { success: true };
 }
@@ -222,4 +236,93 @@ async function enqueueMonitorExecutionJobs(
   // INFO logging removed to reduce log pollution - monitors trigger very frequently
 }
 
+/**
+ * Mark a monitor as DOWN when the scheduler cannot enqueue execution jobs.
+ *
+ * In addition to updating the monitor status, we insert a monitor_results row
+ * for the monitor's first configured location. This preserves consecutive
+ * failure counting so that alert evaluation (threshold checks, notifications)
+ * works correctly when workers recover. Without the result row, failure
+ * thresholds would never increment during a queue outage and the first alert
+ * would be delayed until N real failures accumulate after recovery.
+ *
+ * We use the monitor's actual configured location (not a synthetic
+ * 'scheduler' location) to avoid polluting location-scoped queries.
+ */
+async function recordSchedulingFailure(
+  monitorId: string,
+  errorMessage: string
+): Promise<void> {
+  try {
+    const now = new Date();
+
+    // Update monitor status
+    await db
+      .update(monitors)
+      .set({
+        status: 'down',
+        lastCheckAt: now,
+        updatedAt: now,
+      })
+      .where(eq(monitors.id, monitorId));
+
+    // Determine a real location for the result row.
+    // Use the monitor's configured locations so we don't introduce a bogus region.
+    const monitor = await db.query.monitors.findFirst({
+      where: eq(monitors.id, monitorId),
+      columns: { config: true },
+    });
+    const monitorConfig = monitor?.config as MonitorConfig | null;
+    const locationConfig = monitorConfig?.locationConfig as LocationConfig | null;
+    const configuredLocations = locationConfig?.locations;
+    const location: MonitoringLocation = (configuredLocations && configuredLocations.length > 0
+      ? configuredLocations[0]
+      : 'local') as MonitoringLocation;
+
+    // Read the latest result to maintain consecutive failure counting
+    const lastResult = await db.query.monitorResults.findFirst({
+      where: eq(monitorResults.monitorId, monitorId),
+      orderBy: [desc(monitorResults.checkedAt)],
+      columns: {
+        isUp: true,
+        consecutiveFailureCount: true,
+        alertsSentForFailure: true,
+      },
+    });
+
+    const consecutiveFailureCount = lastResult && !lastResult.isUp
+      ? (lastResult.consecutiveFailureCount ?? 0) + 1
+      : 1;
+    const alertsSentForFailure = lastResult && !lastResult.isUp
+      ? (lastResult.alertsSentForFailure ?? 0)
+      : 0;
+    const isStatusChange = lastResult ? lastResult.isUp : true;
+
+    await db.insert(monitorResults).values({
+      monitorId,
+      checkedAt: now,
+      location,
+      status: 'error',
+      isUp: false,
+      isStatusChange,
+      consecutiveFailureCount,
+      consecutiveSuccessCount: 0,
+      alertsSentForFailure,
+      alertsSentForRecovery: 0,
+      details: {
+        errorMessage: `Scheduling failure: ${errorMessage}`,
+      },
+    });
+
+    logger.warn(
+      { monitorId, errorMessage, consecutiveFailureCount },
+      `Scheduling failure — monitor marked as down with result row (location=${location})`
+    );
+  } catch (err) {
+    logger.error(
+      { monitorId, err },
+      'Failed to record scheduling failure'
+    );
+  }
+}
 
