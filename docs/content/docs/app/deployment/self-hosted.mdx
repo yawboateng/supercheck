@@ -352,7 +352,7 @@ Enable AI-powered test creation, fixes, and performance analysis. Choose your pr
 All supported self-hosted deployments now use the same execution model as cloud. The long-lived worker stays in Docker Compose as a control-plane container, but every Playwright and k6 run executes in its own ephemeral gVisor Job in the `supercheck-execution` namespace.
 
 <Callout type="info">
-**gVisor Sandbox:** `setup-k3s.sh` installs K3s, installs [gVisor](https://gvisor.dev), registers `runsc` for Docker Compose workers, creates the `gvisor` RuntimeClass, provisions the `supercheck-execution` namespace, and writes `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker. Keep `runtime: runsc` on the worker container as well so both the control plane and per-run execution Jobs consistently use gVisor.
+**gVisor Sandbox:** `setup-k3s.sh` installs K3s, installs [gVisor](https://gvisor.dev), configures containerd with the `runsc` handler, creates the `gvisor` RuntimeClass, provisions the `supercheck-execution` namespace, applies the execution `ResourceQuota` and `NetworkPolicy`, and writes `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker. The Docker worker container itself stays on the normal Docker runtime; only the per-run Kubernetes execution Jobs use gVisor.
 </Callout>
 
 <Callout type="info">

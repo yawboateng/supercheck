@@ -77,7 +77,7 @@ The examples below use the built-in `us-east`, `eu-central`, and `asia-pacific` 
 | `asia-pacific` | `playwright-global`, `k6-asia-pacific`, `k6-global`, `monitor-asia-pacific` | Asia Pacific regional worker |
 
 <Callout type="info">
-K6 **job** executions are automatically routed to the default location configured in the Super Admin panel. Ensure at least one worker is running for that location. Playground K6 tests respect the user's location selection.
+K6 executions always resolve to a single location. If the caller provides a location, that value is used after project-restriction validation. Otherwise, Supercheck resolves the project's default available location. Playground K6 tests respect the user's location selection, while scheduled K6 jobs use the project's resolved default.
 </Callout>
 
 ---
@@ -99,7 +99,9 @@ Locations are managed through the **Super Admin** panel.
 4. Toggle **Default** if this should be the default location for K6 job executions. Only one location can be default at a time — setting a new default automatically clears the previous one.
 5. Toggle **Enabled** to activate the location. Disabling a location removes its queues.
 
-All enabled locations are shown in user-facing location pickers, each with an online/offline indicator based on worker heartbeats. If a region is enabled in Super Admin but no worker is currently advertising `k6-{code}` / `monitor-{code}`, it appears with an offline badge — but it is **not removed** from the configuration. This prevents transient worker outages from silently stripping regions from monitor configs. When a monitor or K6 job runs, only locations with an active worker receive jobs; offline locations are skipped gracefully. The run only fails if **no** configured location has an active worker.
+All enabled locations are shown in user-facing location pickers, each with an online/offline indicator based on worker heartbeats. If a region is enabled in Super Admin but no worker is currently advertising `k6-{code}` / `monitor-{code}`, it appears with an offline badge — but it is **not removed** from the configuration. This prevents transient worker outages from silently stripping regions from monitor configs.
+
+Monitor executions degrade gracefully to the online subset: offline locations are skipped, and the run only fails if **no** configured location has a live worker. K6 executions target a single resolved location. If no worker is currently advertising that K6 queue, the job is still accepted and remains queued until a matching worker comes online.
 
 ### Location Table Columns
 

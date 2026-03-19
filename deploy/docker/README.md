@@ -117,7 +117,7 @@ For production self-hosted installs, use the K3s bootstrap:
 sudo bash setup-k3s.sh
 ```
 
-This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
+This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, applies the execution `ResourceQuota` and `NetworkPolicy`, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
 
 > **Linux host recommended:** self-hosted execution should use Docker Engine on Linux plus local K3s. Docker Desktop adds an extra VM layer and is not the supported production target.
 

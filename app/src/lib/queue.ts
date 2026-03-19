@@ -10,11 +10,12 @@ import type { JobType as SchemaJobType } from "@/db/schema";
 import { createLogger } from "./logger/index";
 import {
   getAllEnabledLocationCodes,
-  getDefaultLocationCodes,
   getFirstDefaultLocationCode,
-  getProjectAvailableLocationCodes,
-  hasProjectLocationRestrictions,
 } from "./location-registry";
+import {
+  partitionMonitorLocationsByAvailability,
+  resolveMonitorLocations,
+} from "./monitor-location-routing";
 
 // Local interface for cleanup queues (separate from capacity management)
 interface CleanupQueues {
@@ -1448,91 +1449,6 @@ export async function setQueueCapacityLimit(limit: number): Promise<void> {
 }
 
 /**
- * Resolve effective monitor locations from DB, with multi-tier fallback.
- * Validates configured locations against enabled locations in the DB,
- * falling back to defaults → all enabled → first default location if none are valid.
- * When projectId is provided, further restricts to project-allowed locations.
- * Note: "local" location is only available in self-hosted mode.
- *
- * Shared logic aligns with monitor-scheduler's getEffectiveLocations.
- */
-async function resolveMonitorLocations(
-  locationConfig: LocationConfig | null,
-  projectId?: string
-): Promise<string[]> {
-  if (!locationConfig || !locationConfig.enabled) {
-    return resolveDefaultMonitorLocations(projectId);
-  }
-
-  const configuredLocations = locationConfig.locations;
-  if (!configuredLocations || configuredLocations.length === 0) {
-    return resolveDefaultMonitorLocations(projectId);
-  }
-
-  // Validate configured locations against what's actually enabled in DB
-  const enabledCodes = await getAllEnabledLocationCodes();
-  let validLocations = configuredLocations.filter((loc) =>
-    enabledCodes.includes(loc)
-  );
-
-  // Further restrict to project-allowed locations if projectId is provided
-  if (projectId && validLocations.length > 0) {
-    const projectCodes = await getProjectAvailableLocationCodes(projectId);
-    validLocations = validLocations.filter((loc) => projectCodes.includes(loc));
-  }
-
-  if (validLocations.length === 0) {
-    // All explicitly configured locations are disabled/deleted or restricted.
-    // Throw instead of silently falling back to defaults, which would
-    // execute the monitor from unintended regions and report misleading
-    // latency/availability data. This matches the scheduler's behavior.
-    throw new Error(
-      `Monitor has locations explicitly configured [${configuredLocations.join(', ')}] ` +
-      `but none are currently enabled${projectId ? ' for this project' : ''}. ` +
-      `Re-enable the locations or update the monitor's location configuration.`
-    );
-  }
-
-  return validLocations;
-}
-
-/**
- * Get default monitor locations with a safety fallback chain:
- * default locations → all enabled → first default location.
- * Note: "local" is excluded in cloud-hosted mode via location-registry filtering.
- * When projectId is provided and the project has explicit restrictions,
- * filters the resolved defaults to only project-allowed codes.
- */
-async function resolveDefaultMonitorLocations(projectId?: string): Promise<string[]> {
-  const defaults = await getDefaultLocationCodes();
-  let resolved: string[];
-  if (defaults.length > 0) {
-    resolved = defaults;
-  } else {
-    const enabled = await getAllEnabledLocationCodes();
-    if (enabled.length > 0) {
-      resolved = enabled;
-    } else {
-      const fallback = await getFirstDefaultLocationCode();
-      resolved = [fallback];
-    }
-  }
-
-  // Only filter by project restrictions if the project has explicit restriction rows.
-  // Without this check, getProjectAvailableLocationCodes returns ALL enabled locations
-  // for unrestricted projects, which would turn single-region defaults into multi-location.
-  if (projectId && await hasProjectLocationRestrictions(projectId)) {
-    const projectCodes = await getProjectAvailableLocationCodes(projectId);
-    const filtered = resolved.filter((loc) => projectCodes.includes(loc));
-    if (filtered.length > 0) return filtered;
-    // If none of the defaults are in the project's allowed set, return project codes
-    if (projectCodes.length > 0) return projectCodes;
-  }
-
-  return resolved;
-}
-
-/**
  * Add a monitor execution task to regional queues.
  * Monitors are distributed to their specified locations for accurate latency measurement.
  */
@@ -1554,19 +1470,12 @@ export async function addMonitorExecutionJobToQueue(
     // Determine which locations have active queues — degrade gracefully
     // when a subset of workers is offline rather than aborting entirely.
     // This matches the scheduler's behavior in monitor-scheduler.ts.
-    const activeQueueNames = await getActiveWorkerQueueNamesFromRegistry();
-
-    const enqueuedLocations: string[] = [];
-    const skippedLocations: string[] = [];
-
-    for (const location of effectiveLocations) {
-      const monitorQueue = monitorExecutionQueue[location];
-      if (monitorQueue && activeQueueNames.has(monitorQueueName(location))) {
-        enqueuedLocations.push(location);
-      } else {
-        skippedLocations.push(location);
-      }
-    }
+    const { enqueuedLocations, skippedLocations } =
+      await partitionMonitorLocationsByAvailability(
+        effectiveLocations,
+        Object.keys(monitorExecutionQueue),
+        monitorQueueName
+      );
 
     // Only fail when NO locations can accept jobs
     if (enqueuedLocations.length === 0 && effectiveLocations.length > 0) {

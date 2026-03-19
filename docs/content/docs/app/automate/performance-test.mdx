@@ -28,6 +28,7 @@ Run tests from different geographic locations to measure global performance.
 **Execution Context**: 
 - **Playground**: When multiple project-available locations are available, select a specific location. The "Global" option is shown only when the project is not restricted to specific locations. When only one location exists, tests run automatically without a location prompt.
 - **Jobs**: K6 jobs execute from the project's requested location when provided, otherwise they fall back to the project's default available location.
+- **Worker availability**: The location picker shows live worker status via heartbeat. If a selected K6 location is enabled but currently offline, the run stays queued until a matching worker starts processing that queue.
 
 **Self-Hosted Deployments**: By default, self-hosted instances have a single `local` location. Tests execute from your worker. To enable multi-location testing, deploy additional workers and add locations via the Super Admin panel.
 </Callout>

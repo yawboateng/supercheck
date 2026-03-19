@@ -240,4 +240,24 @@ describe('ContainerExecutorService', () => {
       );
     });
   });
+
+  describe('log collection', () => {
+    it('suppresses live forwarding during replay windows', async () => {
+      const onStdoutChunk = jest.fn();
+      const collector = (service as any).createLogCollector({
+        onStdoutChunk,
+      });
+
+      collector.stream.write('line-1\n');
+      collector.stream.suppressLiveForwarding();
+      collector.stream.write('line-2\n');
+      collector.stream.resumeLiveForwarding();
+      collector.stream.write('line-3\n');
+
+      expect(onStdoutChunk).toHaveBeenCalledTimes(2);
+      expect(onStdoutChunk).toHaveBeenNthCalledWith(1, 'line-1\n');
+      expect(onStdoutChunk).toHaveBeenNthCalledWith(2, 'line-3\n');
+      expect(collector.getOutput()).toBe('line-1\nline-2\nline-3\n');
+    });
+  });
 });

@@ -742,7 +742,10 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   }
 
   private createLogCollector(options: ContainerExecutionOptions): {
-    stream: Writable;
+    stream: Writable & {
+      suppressLiveForwarding: () => void;
+      resumeLiveForwarding: () => void;
+    };
     getOutput: () => string;
     suppressLiveForwarding: () => void;
     resumeLiveForwarding: () => void;
@@ -768,12 +771,20 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         callback();
       },
     });
+    const streamWithControls = Object.assign(stream, {
+      suppressLiveForwarding: () => {
+        suppressLive = true;
+      },
+      resumeLiveForwarding: () => {
+        suppressLive = false;
+      },
+    });
 
     return {
-      stream,
+      stream: streamWithControls,
       getOutput: () => output,
-      suppressLiveForwarding: () => { suppressLive = true; },
-      resumeLiveForwarding: () => { suppressLive = false; },
+      suppressLiveForwarding: streamWithControls.suppressLiveForwarding,
+      resumeLiveForwarding: streamWithControls.resumeLiveForwarding,
     };
   }
 

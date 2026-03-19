@@ -20,7 +20,7 @@
 #   2. Installs gVisor (runsc + containerd-shim-runsc-v1)
 #   3. Configures containerd to use runsc handler
 #   4. Creates gVisor RuntimeClass in Kubernetes
-#   5. Creates supercheck-execution namespace with security policies
+#   5. Creates supercheck-execution namespace, ResourceQuota, and NetworkPolicy
 #   6. Creates restricted worker RBAC and a Docker-friendly kubeconfig
 #   7. Labels the node for gVisor scheduling
 #   8. Verifies gVisor works with a test pod
@@ -248,9 +248,9 @@ scheduling:
     gvisor.io/enabled: "true"
 YAML
 
-# ─── Step 6: Create supercheck-execution namespace ────────────────────────────
+# ─── Step 6: Create execution namespace + guardrails ─────────────────────────
 
-log "Creating supercheck-execution namespace..."
+log "Creating supercheck-execution namespace, ResourceQuota, and NetworkPolicy..."
 k3s kubectl apply -f - <<'YAML'
 apiVersion: v1
 kind: Namespace
@@ -261,6 +261,54 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: execution-limits
+  namespace: supercheck-execution
+  labels:
+    app.kubernetes.io/part-of: supercheck
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    count/jobs.batch: "10"
+    pods: "10"
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: execution-egress
+  namespace: supercheck-execution
+  labels:
+    app.kubernetes.io/part-of: supercheck
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+              - 100.100.100.200/32
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
 YAML
 
 # ─── Step 7: Create restricted worker RBAC + kubeconfig ──────────────────────
@@ -273,6 +321,9 @@ metadata:
   name: supercheck-workers
   labels:
     app.kubernetes.io/name: supercheck-workers
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -451,7 +502,7 @@ echo ""
 info "K3s:       $(k3s --version 2>&1 | head -1)"
 info "gVisor:    $(runsc --version 2>&1 | head -1)"
 info "Node:      $NODE_NAME (gvisor.io/enabled=true)"
-info "Namespace: supercheck-execution (restricted PSS)"
+info "Execution NS: supercheck-execution (restricted PSS, quota, egress policy)"
 echo ""
 info "Next steps:"
 info "  1. Deploy SuperCheck with: kubectl apply -k deploy/k8s/overlays/self-hosted/"

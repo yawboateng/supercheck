@@ -81,7 +81,7 @@ Manage geographic locations for multi-region monitoring and performance testing.
 1. Navigate to **Super Admin → Locations** tab
 2. Click **Add Location**
 3. Fill in the required fields:
-   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Lowercase, 2–63 characters, letters/digits/hyphens only.
+   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Lowercase, 2–50 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`, `local`) are blocked.
    - **Name** — Human-readable display name (e.g. "US East")
    - **Region** — Optional geographic description (e.g. "Ashburn, Virginia")
    - **Flag** — Optional emoji flag for the UI (e.g. 🇺🇸)

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # SuperCheck gVisor Setup Script for Docker
 #
-# Installs gVisor (runsc) as a Docker runtime for secure sandboxed
-# test execution. The worker container runs under gVisor, so all
-# child processes (Playwright, k6, monitors) inherit the sandbox.
+# Installs gVisor (runsc) as an optional Docker runtime for local
+# verification and legacy troubleshooting.
+#
+# Production self-hosted execution does NOT run user code inside the
+# long-lived Docker worker container. The supported path is setup-k3s.sh,
+# which creates per-run Kubernetes Jobs using runtimeClassName: gvisor.
 #
 # Usage:
 #   curl -fsSL -o setup-gvisor.sh https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-gvisor.sh
@@ -158,7 +161,7 @@ else
   exit 1
 fi
 
-# ─── Step 5: Verify runtime: runsc works in Compose syntax ───────────────────
+# ─── Step 5: Verify optional Docker runtime registration ─────────────────────
 
 log "Verifying Docker runtime is available..."
 if docker info 2>/dev/null | grep -q "runsc"; then

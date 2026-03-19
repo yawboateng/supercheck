@@ -168,7 +168,7 @@ Cloud deployments may include additional regions such as US East (Ashburn), EU C
 When multiple locations are configured, checks run independently from each location and results are aggregated to determine overall status.
 
 <Callout type="info">
-**Single Location**: When only one location is available, the multi-location configuration UI is automatically hidden. Location settings appear dynamically when additional locations are added via the Super Admin panel.
+**Single Location**: When only one location is available, the multi-location configuration UI is automatically hidden. Location settings appear dynamically when additional locations are added via the Super Admin panel. If some configured locations are temporarily offline, Supercheck runs the check from the live subset and aggregates only the locations that actually executed.
 </Callout>
 
 ```mermaid

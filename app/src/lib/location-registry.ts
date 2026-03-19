@@ -246,7 +246,7 @@ export async function getLocationByCode(
 
 /**
  * Normalize and validate a K6 location code against the DB.
- * Returns the validated code or falls back to the first default location.
+ * Returns the validated code or the first default when omitted.
  * "global" is always accepted (K6 queue routing treats it as any-worker).
  * "local" is rejected in cloud mode (self-hosted only).
  */
@@ -255,11 +255,11 @@ export async function normalizeK6Location(value?: string | null): Promise<string
   const lower = value.toLowerCase();
   if (lower === "global") return "global";
   if (lower === LOCAL_LOCATION_CODE && shouldExcludeLocal()) {
-    return getFirstDefaultLocationCode();
+    throw new Error('The "local" location is only available on self-hosted deployments.');
   }
   const valid = await validateLocationCode(lower);
   if (valid) return lower;
-  return getFirstDefaultLocationCode();
+  throw new Error(`Location code is not enabled: ${lower}`);
 }
 
 export async function resolveProjectK6Location(
