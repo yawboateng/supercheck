@@ -78,7 +78,6 @@ services:
       # Worker location (required)
       # This determines which regional queue this worker processes.
       # Must match an enabled location code configured in Super Admin.
-      # Must match an enabled location code configured in Super Admin.
       # Examples: us-east, eu-west, ap-south. Use "local" only for
       # single-server self-hosted mode.
       WORKER_LOCATION: ${WORKER_LOCATION:?WORKER_LOCATION is required - set to an enabled location code from Super Admin (e.g. us-east)}

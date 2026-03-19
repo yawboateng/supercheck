@@ -372,7 +372,11 @@ describe('ContainerExecutorService', () => {
       });
 
       expect(job.spec?.template.spec?.dnsPolicy).toBe('ClusterFirst');
-      expect(job.spec?.template.spec?.dnsConfig).toBeUndefined();
+      expect(job.spec?.template.spec?.dnsConfig?.options).toEqual([
+        { name: 'ndots', value: '1' },
+        { name: 'timeout', value: '2' },
+        { name: 'attempts', value: '3' },
+      ]);
     });
 
     it('uses dnsPolicy None with custom nameservers when configured', () => {
@@ -411,6 +415,37 @@ describe('ContainerExecutorService', () => {
         '169.254.20.10',
         '10.43.0.10',
       ]);
+      expect(job.spec?.template.spec?.dnsConfig?.options).toEqual([
+        { name: 'ndots', value: '1' },
+        { name: 'timeout', value: '2' },
+        { name: 'attempts', value: '3' },
+      ]);
+    });
+
+    it('backs off outcome polling for longer-running executions', () => {
+      const nowSpy = jest.spyOn(Date, 'now');
+
+      nowSpy.mockReturnValue(10_000);
+      expect(
+        (service as any).getExecutionOutcomePollIntervalMs(0, 60_000),
+      ).toBe(1_000);
+
+      nowSpy.mockReturnValue(30_000);
+      expect(
+        (service as any).getExecutionOutcomePollIntervalMs(0, 120_000),
+      ).toBe(2_000);
+
+      nowSpy.mockReturnValue(180_000);
+      expect(
+        (service as any).getExecutionOutcomePollIntervalMs(0, 300_000),
+      ).toBe(5_000);
+
+      nowSpy.mockReturnValue(59_900);
+      expect(
+        (service as any).getExecutionOutcomePollIntervalMs(0, 60_000),
+      ).toBe(250);
+
+      nowSpy.mockRestore();
     });
   });
 

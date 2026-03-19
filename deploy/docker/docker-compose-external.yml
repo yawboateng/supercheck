@@ -307,9 +307,6 @@ services:
     environment:
       <<: *common-env
       # App-specific configuration (inherits all common env vars)
-    volumes:
-      # Mount TypeScript definitions for Monaco Editor in playground
-      - ./app/public/supercheck.d.ts:/app/public/supercheck.d.ts:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/api/health"]

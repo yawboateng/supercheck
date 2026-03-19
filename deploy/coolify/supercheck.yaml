@@ -24,6 +24,7 @@ x-common-env: &common-env # Database Configuration
   REDIS_PASSWORD: supercheck-redis-password
   REDIS_URL: redis://:supercheck-redis-password@supercheck-redis:6379
   REDIS_TLS_ENABLED: false
+  REDIS_TLS_REJECT_UNAUTHORIZED: false
 
   # App Configuration
   # Coolify auto-provides SERVICE_URL_APP - override in Coolify Environment Variables if needed
@@ -33,6 +34,7 @@ x-common-env: &common-env # Database Configuration
   BETTER_AUTH_SECRET: ${SERVICE_BASE64_64_AUTH:-supercheck-auth-secret-change-me-in-production-32chars}
   NODE_ENV: production
   SHOW_COMMUNITY_LINKS: ${SHOW_COMMUNITY_LINKS:-true}
+  STATUS_PAGE_DOMAIN: ${STATUS_PAGE_DOMAIN:-localhost}
   STATUS_PAGE_HIDE_BRANDING: ${STATUS_PAGE_HIDE_BRANDING:-false}
 
   # App-Side Capacity Settings
@@ -124,8 +126,20 @@ x-common-env: &common-env # Database Configuration
   AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
   AI_TEMPERATURE: ${AI_TEMPERATURE:-0.1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  AZURE_RESOURCE_NAME: ${AZURE_RESOURCE_NAME:-}
+  AZURE_API_KEY: ${AZURE_API_KEY:-}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_API_VERSION: ${AZURE_API_VERSION:-2024-06-01}
+  AZURE_USE_MANAGED_IDENTITY: ${AZURE_USE_MANAGED_IDENTITY:-false}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+  GOOGLE_VERTEX_PROJECT: ${GOOGLE_VERTEX_PROJECT:-}
+  GOOGLE_VERTEX_LOCATION: ${GOOGLE_VERTEX_LOCATION:-us-central1}
+  BEDROCK_AWS_REGION: ${BEDROCK_AWS_REGION:-}
+  BEDROCK_AWS_ACCESS_KEY_ID: ${BEDROCK_AWS_ACCESS_KEY_ID:-}
+  BEDROCK_AWS_SECRET_ACCESS_KEY: ${BEDROCK_AWS_SECRET_ACCESS_KEY:-}
+  BEDROCK_AWS_SESSION_TOKEN: ${BEDROCK_AWS_SESSION_TOKEN:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
   # Worker Location (use "local" for single-server self-hosted mode,
   # or any enabled Super Admin location code)
@@ -134,19 +148,20 @@ x-common-env: &common-env # Database Configuration
   # Self-Hosted Mode
   SELF_HOSTED: true
 
+  # Registration Controls
+  SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+  ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+
   # OAuth Configuration (Optional)
   GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
   GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
   GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
   GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
 
-  # Chatwoot Customer Support (Cloud Only - not used in self-hosted mode)
-  CHATWOOT_BASE_URL: ${CHATWOOT_BASE_URL:-}
-  CHATWOOT_WEBSITE_TOKEN: ${CHATWOOT_WEBSITE_TOKEN:-}
-
-  # CAPTCHA Configuration (Optional)
-  TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
-  TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+  # Queue Alerting Configuration (optional)
+  QUEUE_ALERTING_ENABLED: ${QUEUE_ALERTING_ENABLED:-true}
+  QUEUE_ALERT_SLACK_WEBHOOK_URL: ${QUEUE_ALERT_SLACK_WEBHOOK_URL:-}
+  QUEUE_ALERT_WEBHOOK_URL: ${QUEUE_ALERT_WEBHOOK_URL:-}
 
 services:
   # PostgreSQL Database
@@ -178,7 +193,7 @@ services:
   # Redis Cache & Queue
   supercheck-redis:
     image: redis:8
-    command: sh -c "rm -rf /data/* && redis-server --requirepass \"supercheck-redis-password\" --maxmemory 512mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode no --bind 0.0.0.0 --tcp-keepalive 300"
+    command: sh -c "rm -rf /data/* && redis-server --requirepass \"supercheck-redis-password\" --maxmemory 512mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode yes --bind 0.0.0.0 --tcp-keepalive 300"
     volumes:
       - supercheck-redis-data-v2:/data
     restart: unless-stopped
@@ -269,6 +284,8 @@ services:
       - /home/pwuser/.cache:size=256M,uid=1000,gid=1000,mode=0700
       - /home/pwuser/.npm:size=256M,uid=1000,gid=1000,mode=0700
     volumes:
+      - supercheck-worker-playwright-reports:/worker/playwright-reports
+      - supercheck-worker-k6-reports:/worker/k6-reports
       - supercheck-worker-reports:/worker/report
       - ${KUBECONFIG_FILE:-/etc/rancher/k3s/supercheck-worker.kubeconfig}:/run/secrets/supercheck-kubeconfig:ro
     extra_hosts:
@@ -307,6 +324,8 @@ volumes:
   supercheck-postgres-data-v10:
   supercheck-redis-data-v2:
   supercheck-minio-data:
+  supercheck-worker-playwright-reports:
+  supercheck-worker-k6-reports:
   supercheck-worker-reports:
 
 networks:

@@ -138,6 +138,18 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ContainerExecutorService.name);
   private static readonly WORKSPACE_ROOT = '/tmp/supercheck';
   private static readonly POST_EXECUTION_GRACE_SECONDS = 300;
+  private static readonly DEFAULT_DNS_OPTIONS: ReadonlyArray<k8s.V1PodDNSConfigOption> =
+    Object.freeze([
+      { name: 'ndots', value: '1' },
+      { name: 'timeout', value: '2' },
+      { name: 'attempts', value: '3' },
+    ]);
+  private static readonly SLOW_POD_STARTUP_WARN_MS = 5_000;
+  private static readonly OUTCOME_POLL_FAST_UNTIL_MS = 15_000;
+  private static readonly OUTCOME_POLL_MEDIUM_UNTIL_MS = 120_000;
+  private static readonly OUTCOME_POLL_FAST_MS = 1_000;
+  private static readonly OUTCOME_POLL_MEDIUM_MS = 2_000;
+  private static readonly OUTCOME_POLL_SLOW_MS = 5_000;
   private readonly activeCancellationIntervals: Set<NodeJS.Timeout> =
     new Set();
 
@@ -228,10 +240,12 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     }
     if (this.executionDnsNameservers?.length) {
       this.logger.log(
-        `Execution DNS nameservers: ${this.executionDnsNameservers.join(', ')} (dnsPolicy: None)`,
+        `Execution DNS nameservers: ${this.executionDnsNameservers.join(', ')} (dnsPolicy: None, ndots=1, timeout=2, attempts=3)`,
       );
     } else {
-      this.logger.log('Execution DNS policy: ClusterFirst (default)');
+      this.logger.log(
+        'Execution DNS policy: ClusterFirst with resolver options ndots=1, timeout=2, attempts=3',
+      );
     }
   }
 
@@ -454,6 +468,8 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     let killed = false;
     let timedOut = false;
     let combinedLogs = '';
+    let podStartupDurationMs = 0;
+    let artifactExtractionDurationMs = 0;
     const logCollector = this.createLogCollector(options);
 
     try {
@@ -484,7 +500,21 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
+      const podWaitStartedAt = Date.now();
       podName = await this.waitForExecutionPod(jobName);
+      podStartupDurationMs = Date.now() - podWaitStartedAt;
+      if (
+        podStartupDurationMs >
+        ContainerExecutorService.SLOW_POD_STARTUP_WARN_MS
+      ) {
+        this.logger.warn(
+          `[${jobName}] Execution pod ${podName} became visible after ${podStartupDurationMs}ms. Slow startup usually indicates image pull, scheduling pressure, or cluster DNS/network latency.`,
+        );
+      } else {
+        this.logger.debug(
+          `[${jobName}] Execution pod ${podName} became visible after ${podStartupDurationMs}ms`,
+        );
+      }
 
       logAbort = this.startLogStreamWithReconnect(
         podName,
@@ -502,11 +532,17 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
 
       if (options.extractFromContainer && options.extractToHost && !timedOut && !killed) {
         const extractSource = this.rewriteTmpPath(options.extractFromContainer, workspace);
+        const extractionStartedAt = Date.now();
         try {
           await this.extractPodArtifacts(podName, extractSource, options.extractToHost, workspace);
+          artifactExtractionDurationMs = Date.now() - extractionStartedAt;
+          this.logger.debug(
+            `[${jobName}] Extracted artifacts from ${podName} in ${artifactExtractionDurationMs}ms`,
+          );
         } catch (extractError) {
+          artifactExtractionDurationMs = Date.now() - extractionStartedAt;
           this.logger.error(
-            `Failed to extract pod artifacts: ${
+            `Failed to extract pod artifacts after ${artifactExtractionDurationMs}ms: ${
               extractError instanceof Error ? extractError.message : String(extractError)
             }`,
           );
@@ -541,6 +577,9 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       const exitCode = killed
         ? 137
         : (outcome.exitCode ?? (timedOut ? 124 : 1));
+      this.logger.log(
+        `[${jobName}] Execution finished exitCode=${exitCode} duration=${duration}ms podStartup=${podStartupDurationMs}ms artifactExtraction=${artifactExtractionDurationMs}ms timedOut=${timedOut} cancelled=${killed}`,
+      );
 
       return {
         success: exitCode === 0 && !timedOut && !killed,
@@ -596,6 +635,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     const { jobName, workspace, shellScript, workingDir, limits, options } = params;
     const image = options.image || this.defaultImage;
     const envVars = this.buildKubernetesEnv(options.env, workspace);
+    const dnsSettings = this.buildExecutionPodDnsSettings();
     const deadlineSeconds = Math.ceil((limits.timeoutMs + 120_000) / 1000);
     const resourceCpuLimit = `${Math.max(100, Math.round(limits.cpuLimit * 1000))}m`;
     const resourceCpuRequest = `${Math.max(100, Math.round(limits.cpuLimit * 500))}m`;
@@ -644,30 +684,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
             terminationGracePeriodSeconds: 1,
             nodeSelector: this.executionNodeSelector,
             tolerations: this.executionTolerations,
-            // DNS configuration: use ClusterFirst (inherits cluster DNS) by
-            // default.  Operators can override with EXECUTION_DNS_NAMESERVERS
-            // to use explicit nameservers (e.g. NodeLocal DNSCache) which
-            // switches to dnsPolicy: None.
-            ...(this.executionDnsNameservers?.length
-              ? {
-                  dnsPolicy: 'None' as const,
-                  dnsConfig: {
-                    nameservers: this.executionDnsNameservers,
-                    searches: [
-                      `${this.executionNamespace}.svc.cluster.local`,
-                      'svc.cluster.local',
-                      'cluster.local',
-                    ],
-                    options: [
-                      { name: 'ndots', value: '1' },
-                      { name: 'timeout', value: '2' },
-                      { name: 'attempts', value: '3' },
-                    ],
-                  },
-                }
-              : {
-                  dnsPolicy: 'ClusterFirst' as const,
-                }),
+            ...dnsSettings,
             securityContext: {
               runAsNonRoot: true,
               runAsUser: 1000,
@@ -732,6 +749,37 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
             ],
           },
         },
+      },
+    };
+  }
+
+  private buildExecutionPodDnsSettings(): Pick<
+    k8s.V1PodSpec,
+    'dnsPolicy' | 'dnsConfig'
+  > {
+    const options = [
+      ...ContainerExecutorService.DEFAULT_DNS_OPTIONS,
+    ];
+
+    if (this.executionDnsNameservers?.length) {
+      return {
+        dnsPolicy: 'None',
+        dnsConfig: {
+          nameservers: this.executionDnsNameservers,
+          searches: [
+            `${this.executionNamespace}.svc.cluster.local`,
+            'svc.cluster.local',
+            'cluster.local',
+          ],
+          options,
+        },
+      };
+    }
+
+    return {
+      dnsPolicy: 'ClusterFirst',
+      dnsConfig: {
+        options,
       },
     };
   }
@@ -1011,6 +1059,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     workspace: string,
     timeoutMs: number,
   ): Promise<{ exitCode: number; timedOut: boolean; cancelled: boolean; message?: string }> {
+    const startedAt = Date.now();
     const timeoutAt = Date.now() + timeoutMs;
     const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
 
@@ -1064,7 +1113,9 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         };
       }
 
-      await this.sleep(1000);
+      await this.sleep(
+        this.getExecutionOutcomePollIntervalMs(startedAt, timeoutAt),
+      );
     }
 
     return {
@@ -1073,6 +1124,25 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       cancelled: false,
       message: `Execution timed out after ${timeoutMs}ms`,
     };
+  }
+
+  private getExecutionOutcomePollIntervalMs(
+    startedAt: number,
+    timeoutAt: number,
+  ): number {
+    const elapsedMs = Date.now() - startedAt;
+    let intervalMs = ContainerExecutorService.OUTCOME_POLL_SLOW_MS;
+
+    if (elapsedMs < ContainerExecutorService.OUTCOME_POLL_FAST_UNTIL_MS) {
+      intervalMs = ContainerExecutorService.OUTCOME_POLL_FAST_MS;
+    } else if (
+      elapsedMs < ContainerExecutorService.OUTCOME_POLL_MEDIUM_UNTIL_MS
+    ) {
+      intervalMs = ContainerExecutorService.OUTCOME_POLL_MEDIUM_MS;
+    }
+
+    const remainingMs = Math.max(250, timeoutAt - Date.now());
+    return Math.min(intervalMs, remainingMs);
   }
 
   private async readExecutionExitCode(

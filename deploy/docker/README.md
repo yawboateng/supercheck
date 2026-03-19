@@ -80,7 +80,9 @@ OAuth (`GITHUB_*` / `GOOGLE_*`) is optional in self-hosted mode.
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Optional GitHub social sign-in | - |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional Google social sign-in | - |
 | `SMTP_HOST`, `SMTP_FROM_EMAIL` (+ optional `SMTP_USER`/`SMTP_PASSWORD`) | Email notifications (disabled if SMTP_HOST not set) | - |
-| `OPENAI_API_KEY` | AI features | - |
+| `AI_PROVIDER` | AI provider (`openai`, `azure`, `anthropic`, `gemini`, `google-vertex`, `bedrock`, `openrouter`) | `openai` |
+| `AI_MODEL` | AI model name | `gpt-4o-mini` |
+| `OPENAI_API_KEY` | AI features (for default OpenAI provider) | - |
 | `WORKER_REPLICAS` | Number of worker containers (worker-side scaling knob) | `1` |
 | `RUNNING_CAPACITY` | App-side gate: max concurrent test runs (set equal to `WORKER_REPLICAS`) | `1` |
 | `QUEUED_CAPACITY` | App-side gate: max queued test runs before new submissions are rejected | `10` |
