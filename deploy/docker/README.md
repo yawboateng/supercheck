@@ -8,19 +8,17 @@ Production-ready Docker Compose files for self-hosting Supercheck.
 git clone https://github.com/supercheck-io/supercheck.git
 cd supercheck/deploy/docker
 
-# Generate secrets
+# Generate secrets and set up the execution sandbox
 sudo bash init-secrets.sh
-
-# Install local K3s + gVisor for the execution plane
 sudo bash setup-k3s.sh
 
 # Edit .env for optional integrations (SMTP, AI, OAuth)
 nano .env
 
-# Start self-hosted stack with the same Kubernetes Job execution model used in cloud
+# Start self-hosted stack
 KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
 
-# Or start (production with HTTPS)
+# Or start with HTTPS
 KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-secure.yml up -d
 ```
 
@@ -33,9 +31,12 @@ docker compose version
 # Should show: Docker Compose version v2.x.x or higher
 ```
 
-**Install Docker:**
-- **Linux (supported for self-hosted execution)**: `curl -fsSL https://get.docker.com | sh`
-- **macOS/Windows**: fine for evaluation only, but not the supported self-hosted execution target
+**Install Docker (Linux only):**
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+> **Linux Required:** Supercheck uses sandboxed Kubernetes pods for test execution, which is only available on Linux.
 
 ---
 
@@ -43,10 +44,10 @@ docker compose version
 
 | File | Use Case |
 |------|----------|
-| `docker-compose.yml` | Self-hosted deployment with local K3s-backed execution (HTTP, localhost:3000) |
-| `docker-compose-secure.yml` | Production with HTTPS and local K3s-backed execution |
-| `docker-compose-worker.yml` | Remote regional worker with local K3s-backed execution |
-| `docker-compose-local.yml` | Source-based local development with the same K3s-backed execution model |
+| `docker-compose.yml` | Self-hosted deployment (HTTP, localhost:3000) |
+| `docker-compose-secure.yml` | Production with HTTPS |
+| `docker-compose-worker.yml` | Remote regional worker |
+| `docker-compose-local.yml` | Source-based local development |
 
 ---
 
@@ -105,23 +106,21 @@ For single-server deployments, keep `WORKER_LOCATION=local` so one worker proces
 
 ---
 
-## gVisor Sandbox (Required)
+## Execution Sandbox
 
-Production self-hosted deployments now use the same execution model as cloud: the worker always creates per-run Jobs in the local `supercheck-execution` namespace. Those Jobs use `runtimeClassName: gvisor`, so Playwright and k6 always execute under gVisor regardless of whether you are self-hosting or running in cloud Kubernetes.
-
-The Docker worker container runs as a standard Docker container (no special runtime). It is only the control plane — untrusted code executes exclusively inside gVisor-sandboxed Kubernetes execution Jobs, never inside the long-lived worker container.
+Production self-hosted deployments use [gVisor](https://gvisor.dev) for sandboxed test execution. Each Playwright and k6 run executes in an isolated environment.
 
 ### Installation
 
-For production self-hosted installs, use the K3s bootstrap:
+Run the bootstrap script on your host:
 
 ```bash
 sudo bash setup-k3s.sh
 ```
 
-This installs K3s, installs gVisor, configures containerd with the `runsc` runtime, creates the `gvisor` RuntimeClass, creates the `supercheck-execution` namespace, applies the execution `LimitRange`, `ResourceQuota`, and `NetworkPolicy`, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig` for the Compose worker to mount.
+This installs the execution sandbox, creates the `supercheck-execution` namespace with appropriate resource limits and network policies, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig`.
 
-> **Linux host recommended:** self-hosted execution should use Docker Engine on Linux plus local K3s. Docker Desktop adds an extra VM layer and is not the supported production target.
+> **Linux host recommended:** Docker Engine on Linux is the supported production target. Docker Desktop adds an extra VM layer and is intended for evaluation only.
 
 ---
 

@@ -4,9 +4,9 @@ description: Deploy workers in multiple geographic regions for true global cover
 icon: MapPin
 ---
 
-Enable true multi-location monitoring and performance testing by deploying workers in different geographic regions.
+Deploy workers across multiple regions for geographic test execution and monitoring coverage.
 
-## How It Works
+## Architecture
 
 ```mermaid
 flowchart TB
@@ -53,159 +53,103 @@ flowchart TB
     style APAC fill:none,stroke:#64748b,stroke-width:2px,stroke-dasharray: 5 5
 ```
 
-<Callout type="info">
-**Key Insight**: Queue routing is mixed by workload type. Regional workers process `playwright-global`, their regional K6 queue plus `k6-global`, and only their regional monitor queue.
-</Callout>
-
 ---
 
-## Architecture Overview
+## Queue Routing
 
-Queue names now follow a dynamic pattern derived from enabled locations in Super Admin:
-
-- Playwright: `playwright-global`
-- K6: `k6-global` plus `k6-{location-code}`
-- Monitors: `monitor-{location-code}`
-
-The examples below use sample location codes like `us-east`, `eu-central`, and `asia-pacific`, but any enabled custom location follows the same routing pattern.
+Queue names are dynamically created from enabled locations in Super Admin.
 
 | `WORKER_LOCATION` | Queues Processed | Use Case |
 |-------------------|-----------------|----------|
-| `local` | **All queues** (regional + global) | Local development, single-server (self-hosted only) |
-| `us-east` | `playwright-global`, `k6-us-east`, `k6-global`, `monitor-us-east` | US East regional worker |
-| `eu-central` | `playwright-global`, `k6-eu-central`, `k6-global`, `monitor-eu-central` | EU Central regional worker |
-| `asia-pacific` | `playwright-global`, `k6-asia-pacific`, `k6-global`, `monitor-asia-pacific` | Asia Pacific regional worker |
+| `local` | **All queues** (regional + global) | Single-server / development |
+| `us-east` | `playwright-global`, `k6-us-east`, `k6-global`, `monitor-us-east` | US East worker |
+| `eu-central` | `playwright-global`, `k6-eu-central`, `k6-global`, `monitor-eu-central` | EU Central worker |
 
 <Callout type="info">
-K6 executions always resolve to a single location. If the caller provides a location, that value is used after project-restriction validation. Otherwise, Supercheck resolves the project's default available location. Playground K6 tests respect the user's location selection, while scheduled K6 jobs use the project's resolved default.
+**Routing rules**: Playwright jobs go to `playwright-global` (any worker picks them up). K6 jobs target a single resolved location queue plus `k6-global`. Monitors run only on their configured location queues.
 </Callout>
 
 ---
 
 ## Managing Locations
 
-Locations are managed through the **Super Admin** panel.
+Locations are managed in **Super Admin → Locations**.
 
-### Adding a Location
+| Field | Required | Description |
+|-------|----------|-------------|
+| **Code** | Yes | Unique identifier for queue names (e.g. `us-east`). Lowercase, 2–50 chars, letters/digits/hyphens. Reserved codes blocked. |
+| **Name** | Yes | Display name (e.g. "US East") |
+| **Region** | No | Geographic description (e.g. "Ashburn, Virginia") |
+| **Flag** | No | Emoji flag for UI (e.g. 🇺🇸) |
+| **Coordinates** | No | Lat/lng for map visualization |
+| **Default** | No | Default location for K6 jobs. Only one at a time. |
+| **Enabled** | No | Active status. Disabling removes queues. |
 
-1. Navigate to **Super Admin → Locations** tab.
-2. Click **Add Location**.
-3. Fill in the required fields:
-   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Must be lowercase, 2–50 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`, `local`) are blocked.
-   - **Name** — Human-readable display name (e.g. "US East").
-   - **Region** — Optional description (e.g. "Ashburn, Virginia").
-   - **Flag** — Optional emoji flag for the UI (e.g. 🇺🇸).
-   - **Coordinates** — Optional latitude/longitude for the map visualization.
-4. Toggle **Default** if this should be the default location for K6 job executions. Only one location can be default at a time — setting a new default automatically clears the previous one.
-5. Toggle **Enabled** to activate the location. Disabling a location removes its queues.
+### Status Indicators
 
-All enabled locations are shown in user-facing location pickers, each with an online/offline indicator based on worker heartbeats. If a region is enabled in Super Admin but no worker is currently advertising `k6-{code}` / `monitor-{code}`, it appears with an offline badge — but it is **not removed** from the configuration. This prevents transient worker outages from silently stripping regions from monitor configs.
+| Status | Meaning |
+|--------|---------|
+| **Active** | Enabled, workers connected (heartbeat detected) |
+| **Offline** | Enabled, no workers currently connected |
+| **Disabled** | Toggled off — no queues created |
 
-Monitor executions degrade gracefully to the online subset: offline locations are skipped, and the run only fails if **no** configured location has a live worker. K6 executions target a single resolved location. If no worker is currently advertising that K6 queue, the job is still accepted and remains queued until a matching worker comes online.
+<Callout type="info">
+Offline locations stay visible in the UI to prevent transient outages from silently removing regions from monitor configs. Monitors degrade gracefully to the online subset. K6 jobs remain queued until a matching worker comes online.
+</Callout>
 
-### Location Table Columns
+### Project Location Restrictions
 
-| Column | Description |
-|--------|-------------|
-| Flag | Emoji flag for the region |
-| Name | Display name |
-| Code | Queue identifier (immutable after creation) |
-| Region | Geographic description |
-| Workers | Number of active workers (from heartbeat data) |
-| Status | **Active** (has workers), **Offline** (no workers), **Disabled** (toggled off) |
-| Default | Whether this is the default K6 job location |
-| Enabled | Whether queues are created for this location |
-
-### Setting the Default Location
-
-The default location determines where K6 **job** executions run. Only one location can be default. When you toggle a location as default via the UI or API, all other locations are automatically cleared.
-
----
-
-## Project Location Restrictions
-
-Organization admins can restrict which locations a specific project is allowed to use. This is useful for compliance, data residency, or cost control.
-
-1. Navigate to **Settings → Admin** (requires Org Admin or Org Owner role).
-2. Find the project in the projects table and open the **Project Locations** dialog.
-3. Select the locations this project is allowed to use.
-4. An **empty selection means no restrictions** — the project can use all enabled locations.
-
-When a project has location restrictions, only the allowed locations appear in location pickers (monitor configuration, K6 test settings, etc.). The `useAvailableLocations()` hook automatically filters locations based on the active project's restrictions.
+Org admins can restrict which locations a project may use via **Settings → Admin → Project Locations**.
 
 ---
 
 ## Setup
 
-For true geographic distribution, deploy workers in each region.
-
 <Steps>
   <Step>
-    ### Configure Main Server Location
+    ### Configure Main Server
 
-    Update your main server's `.env` to set a specific region:
+    Update your main server's `.env` to set a specific region instead of `local`:
 
     ```bash
-    # Set to your main server's actual location
     WORKER_LOCATION=eu-central
     ```
 
-    Restart:
+    Restart using the same Compose file your main server already uses:
     ```bash
+    # Quick Start (HTTP)
     docker compose down && \
-    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+    docker compose up -d
+
+    # Production (HTTPS)
+    docker compose -f docker-compose-secure.yml down && \
+    KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+    docker compose -f docker-compose-secure.yml up -d
     ```
   </Step>
 
   <Step>
     ### Expose Services
 
-    Update your Docker Compose to expose database services for remote workers:
+    Expose database ports for remote worker access in your Docker Compose file:
 
-    <Tabs items={['Production (Secure)', 'Testing (Insecure)']}>
-      <Tab value="Production (Secure)">
-        If you are using `docker-compose-secure.yml` (recommended), you need to expose the ports in that file.
+    ```yaml
+    services:
+      postgres:
+        ports:
+          - "5432:5432"
+      redis:
+        ports:
+          - "6379:6379"
+      minio:
+        ports:
+          - "9000:9000"
+    ```
 
-        <Callout type="warn">
-        **Security Notice**: See the [Security Notice](#security-notice) section below before exposing these ports.
-        </Callout>
-
-        Edit `docker-compose-secure.yml`:
-
-        ```yaml
-        services:
-          postgres:
-            ports:
-              - "5432:5432"
-          
-          redis:
-            ports:
-              - "6379:6379"
-          
-          minio:
-            ports:
-              - "9000:9000"
-        ```
-      </Tab>
-      <Tab value="Testing (Insecure)">
-        For local testing or internal networks `docker-compose.yml`:
-
-        ```yaml
-        services:
-          postgres:
-            ports:
-              - "5432:5432"
-          
-          redis:
-            ports:
-              - "6379:6379"
-          
-          minio:
-            ports:
-              - "9000:9000"
-        ```
-      </Tab>
-    </Tabs>
+    <Callout type="error">
+    **Security**: Exposing database ports requires proper network security. Use VPN (WireGuard/Tailscale), firewall rules, or encrypted tunnels. See [Security](#security) below.
+    </Callout>
   </Step>
 
   <Step>
@@ -213,76 +157,51 @@ For true geographic distribution, deploy workers in each region.
 
     On each remote VPS:
 
-    **1. Install Docker:**
-    
-    <Callout type="info">
-    Skip this step if Docker is already installed on the remote VPS.
-    </Callout>
-    
-    <Tabs items={['Linux VPS', 'macOS', 'Windows']}>
-      <Tab value="Linux VPS">
-        ```bash
-        curl -fsSL https://get.docker.com | sh
-        sudo usermod -aG docker $USER
-        newgrp docker
-        ```
-      </Tab>
-      <Tab value="macOS">
-        Download [Docker Desktop](https://www.docker.com/products/docker-desktop/) for Mac.
-      </Tab>
-      <Tab value="Windows">
-        Download [Docker Desktop](https://www.docker.com/products/docker-desktop/) for Windows.
-      </Tab>
-    </Tabs>
+    **1. Install Docker and execution sandbox:**
 
-    **2. Install local K3s + gVisor (required for production):**
+    <Callout type="info">
+    Each remote worker requires a **Linux server** with Docker and the execution sandbox installed.
+    </Callout>
+
     ```bash
+    curl -fsSL https://get.docker.com | sh
+    sudo usermod -aG docker $USER && newgrp docker
+
+    # Execution sandbox (K3s + gVisor)
     curl -fsSL -o setup-k3s.sh https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/setup-k3s.sh
     sudo bash setup-k3s.sh
     ```
 
-    This writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig`. The remote worker container mounts that file and uses the same Kubernetes Job + gVisor execution path as cloud deployments.
-
-    **3. Download Worker Compose:**
+    **2. Download worker compose:**
     ```bash
     mkdir -p ~/supercheck-worker && cd ~/supercheck-worker
     curl -o docker-compose-worker.yml https://raw.githubusercontent.com/supercheck-io/supercheck/main/deploy/docker/docker-compose-worker.yml
     ```
 
-    **4. Create `.env`:**
-    
-    Create a `.env` file with the following configuration. Replace the placeholder values with your actual credentials from the main server:
-    
+    **3. Create `.env`:**
     ```bash
-    # ─────────────────────────────────────────────────────────────────
-    # Remote Worker Configuration
-    # ─────────────────────────────────────────────────────────────────
-    
-    # Database connection (get password from main server's .env file)
+    # Worker location (must match an enabled location code in Super Admin)
+    WORKER_LOCATION=us-east
+
+    # Database
     DATABASE_URL=postgresql://postgres:YOUR_DB_PASSWORD@MAIN_SERVER_IP:5432/supercheck
-    
-    # Redis connection
-    # The worker uses REDIS_HOST, REDIS_PORT, and REDIS_PASSWORD directly
+
+    # Redis
     REDIS_HOST=MAIN_SERVER_IP
     REDIS_PORT=6379
     REDIS_PASSWORD=YOUR_REDIS_PASSWORD
-    
-    # S3/MinIO connection (use main server's MinIO credentials)
+
+    # S3/MinIO
     S3_ENDPOINT=http://MAIN_SERVER_IP:9000
     AWS_ACCESS_KEY_ID=YOUR_MINIO_ACCESS_KEY
     AWS_SECRET_ACCESS_KEY=YOUR_MINIO_SECRET_KEY
-    
-    # ─────────────────────────────────────────────────────────────────
-    # Worker Location (must match an enabled location code in Super Admin)
-    # ─────────────────────────────────────────────────────────────────
-    WORKER_LOCATION=us-east
     ```
-    
+
     <Callout type="tip">
-    Find your main server credentials in the `.env` file at `supercheck/deploy/docker/.env`.
+    Find credentials in your main server's `.env` at `supercheck/deploy/docker/.env`.
     </Callout>
 
-    **5. Start Worker:**
+    **4. Start:**
     ```bash
     KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-worker.yml up -d
     docker compose -f docker-compose-worker.yml logs -f  # Verify connection
@@ -349,7 +268,7 @@ AWS_SECRET_ACCESS_KEY=YOUR_MINIO_SECRET_KEY
 # Main server: total of 3 workers across all servers (1 + 1 + 1)
 RUNNING_CAPACITY=3 QUEUED_CAPACITY=30 \
 KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
-docker compose up -d
+docker compose -f docker-compose-secure.yml up -d
 
 # Remote worker server: scale replicas on that server only
 WORKER_REPLICAS=1 \
@@ -365,14 +284,13 @@ docker compose -f docker-compose-worker.yml up -d
 
 ---
 
-## Security Notice
+## Security
 
 <Callout type="error">
 **Important**: Multi-location deployments require exposing database ports (PostgreSQL, Redis, MinIO) over the network. You are responsible for securing these connections using appropriate measures such as:
 - **VPN** (WireGuard, Tailscale)
 - **Firewall rules** (UFW, iptables, Cloud Security Groups)
 - **Encrypted tunnels**
-- **Host-level K3s + gVisor** on every worker server via `setup-k3s.sh`
 
 Detailed network security configuration is beyond the scope of this documentation. Please consult your infrastructure provider's security best practices.
 </Callout>
@@ -381,32 +299,10 @@ Detailed network security configuration is beyond the scope of this documentatio
 
 ## Troubleshooting
 
-**Worker can't connect to database:**
-```bash
-docker run --rm -it postgres:18 psql "$DATABASE_URL" -c "SELECT 1"
-```
-
-**Worker can't connect to Redis:**
-```bash
-docker run --rm -it redis:8 redis-cli -h MAIN_SERVER_IP -p 6379 -a YOUR_REDIS_PASSWORD ping
-```
-
-
-**Verify worker location:**
-```bash
-docker compose logs worker | grep "WORKER_LOCATION"
-```
-
-**K6 jobs stuck in queued state:**
-```bash
-# Ensure at least one worker is subscribed to your default K6 location queue
-docker compose logs worker | grep "K6Module initialized"
-```
-
-**K6 execution fails with "queue not available" error:**
-
-This means the requested regional queue (e.g. `k6-us-east`) does not exist yet. This happens when no worker has registered for that location. Ensure a worker with the matching `WORKER_LOCATION` is running and has subscribed to the queue.
-
-**Monitor execution fails with "No monitor execution queues available":**
-
-This means none of the monitor's configured locations have active worker queues. Verify that workers are running in the required regions, and that the location codes in the monitor configuration match the `WORKER_LOCATION` values of your deployed workers.
+| Issue | Diagnostic Command |
+|-------|-------------------|
+| Worker can't reach DB | `docker run --rm postgres:18 psql "$DATABASE_URL" -c "SELECT 1"` |
+| Worker can't reach Redis | `docker run --rm redis:8 redis-cli -h MAIN_SERVER_IP -a PASSWORD ping` |
+| Verify worker location | `docker compose logs worker \| grep WORKER_LOCATION` |
+| K6 jobs stuck queued | Ensure a worker has the matching `WORKER_LOCATION` running |
+| "No monitor queues available" | Verify workers are running in the monitor's configured locations |

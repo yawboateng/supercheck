@@ -315,10 +315,10 @@ function ActionsCell({ log }: { log: AuditLog }) {
       <DialogTrigger asChild>
         <Button
           variant="ghost"
-          size="sm"
-          className="h-8 w-8 p-0 hover:bg-muted transition-colors"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground bg-muted/50 hover:bg-muted hover:text-foreground"
         >
-          <Eye className="h-4 w-4 text-muted-foreground" />
+          <Eye className="h-4 w-4" />
         </Button>
       </DialogTrigger>
       <DialogContent className="min-w-[1000px] ">

@@ -2,11 +2,13 @@
 
 Self-host Supercheck on your own infrastructure.
 
+> **Linux Required:** Supercheck uses sandboxed Kubernetes pods for test execution, which is only available on Linux.
+
 ## Quick Deploy
 
 [![Deploy on Coolify](https://img.shields.io/badge/Deploy%20on-Coolify-6B16ED?style=for-the-badge&logo=coolify&logoColor=white)](./coolify/README.md)
 
-Coolify template deployment on [Coolify](https://coolify.io) with host-level K3s + gVisor bootstrap for the execution plane.
+Coolify template deployment on [Coolify](https://coolify.io).
 
 ## Docker Compose
 
@@ -16,10 +18,8 @@ For manual deployment with Docker Compose:
 git clone https://github.com/supercheck-io/supercheck.git
 cd supercheck/deploy/docker
 
-# Generate secure secrets
+# Generate secrets and set up the execution sandbox
 sudo bash init-secrets.sh
-
-# Install local K3s + gVisor for the execution plane
 sudo bash setup-k3s.sh
 
 # Start services

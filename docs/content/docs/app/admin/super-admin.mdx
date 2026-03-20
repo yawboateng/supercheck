@@ -80,14 +80,17 @@ Manage geographic locations for multi-region monitoring and performance testing.
 
 1. Navigate to **Super Admin → Locations** tab
 2. Click **Add Location**
-3. Fill in the required fields:
-   - **Code** — Unique identifier used in queue names (e.g. `us-east`). Lowercase, 2–50 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`, `local`) are blocked.
-   - **Name** — Human-readable display name (e.g. "US East")
-   - **Region** — Optional geographic description (e.g. "Ashburn, Virginia")
-   - **Flag** — Optional emoji flag for the UI (e.g. 🇺🇸)
-   - **Coordinates** — Optional latitude/longitude for map visualization
-4. Toggle **Default** to set as the default K6 job execution location
-5. Toggle **Enabled** to activate the location and create its queues
+3. Fill in the fields described below and click **Save**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| **Code** | Yes | Unique identifier used in queue names (e.g. `us-east`). Lowercase, 2–50 characters, letters/digits/hyphens only, no consecutive hyphens. Reserved codes (`global`, `all`, `default`, `none`, `any`, `local`) are blocked. |
+| **Name** | Yes | Human-readable display name (e.g. "US East"). |
+| **Region** | No | Geographic description (e.g. "Ashburn, Virginia"). |
+| **Flag** | No | Emoji flag for the UI (e.g. 🇺🇸). |
+| **Coordinates** | No | Latitude/longitude for map visualization. |
+| **Default** | No | Set as the default K6 job execution location. |
+| **Enabled** | No | Activate the location and create its queues. |
 
 ### Location Status
 

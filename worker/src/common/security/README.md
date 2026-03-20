@@ -267,107 +267,49 @@ ps aux | grep playwright
 ### Execution Overhead
 
 - **Spawn time**: ~100-500ms (child_process.spawn)
-- **gVisor overhead**: ~50-100ms additional syscall interception", "oldString": "### Cleanup Orphaned Containers
-
-The service automatically cleans up orphaned containers, but you can also manually clean:
-
-```bash
-# Remove all supercheck execution containers
-docker rm -f $(docker ps -a --filter \"name=supercheck-exec-*\" -q)
-```
-
-## Performance Considerations
-
-### Container Overhead
-
-- **Cold start**: ~2-3 seconds (first container)
-- **Warm start**: ~500ms-1s (image cached)
-- **Memory overhead**: ~50-100MB per container
-- **CPU overhead**: Minimal (<5%)
+- **gVisor overhead**: ~50-100ms additional syscall interception
 
 ### Optimization Tips
 
-1. **Pre-pull images**: Pull Docker images during deployment
-2. **Use image caching**: Keep images on worker nodes
-3. **Adjust limits**: Tune CPU/memory for your workload
-4. **Network mode**: Use `none` for better isolation, `bridge` for network tests
+1. **Pre-install browsers**: Ensure Playwright browsers are pre-installed in the worker image
+2. **Tune resource limits**: Adjust CPU/memory for your workload
+3. **Use gVisor `platform=systrap`**: Recommended for best syscall interception performance
 
 ## Troubleshooting
 
-### Container execution is not working
+### Execution is not working
 
-**Check Docker availability:**
-
-```bash
-docker --version
-docker ps
-```
-
-**Check permissions:**
+**Check worker logs:**
 
 ```bash
-# User needs to be in docker group
-groups | grep docker
-
-# If not, add user to docker group
-sudo usermod -aG docker $USER
-# Then logout and login again
+# View worker logs for execution errors
+docker compose logs worker | grep -i "execution\|error"
 ```
 
-### Container Execution is Mandatory
+**Check gVisor availability (production):**
 
-Container execution is now mandatory for all tests. Execution will fail with a clear error message if:
-
-- Docker is not installed or not running
-- Docker permissions are insufficient
-- Required Docker image is not available
-
-**Action Required**: Ensure Docker is properly installed and running with correct permissions.
+```bash
+# Verify gVisor runtime is available
+runsc --version
+```
 
 ### Performance issues
 
-If containers are slow:
+If executions are slow:
 
-1. **Pre-pull images**: `docker pull <image>`
-2. **Check Docker resources**: Ensure Docker has adequate CPU/memory
-3. **Reduce limits**: Lower CPU/memory limits if tests are lightweight
-4. **Use local registry**: Cache images in a local registry
-
-## Testing
-
-### Test Container Execution
-
-```bash
-# Start worker
-npm run start:dev
-
-# Submit a test and check logs for:
-# "[Container] Executing in container: ..."
-```
-
-### Test Docker Unavailable
-
-```bash
-# Stop Docker
-sudo systemctl stop docker
-
-# Start worker
-npm run start:dev
-
-# Submit a test - should fail with clear error message:
-# "Docker is not available or the required image could not be pulled..."
-```
+1. **Check resource limits**: Ensure adequate CPU/memory
+2. **Monitor process count**: High process counts may indicate resource contention
+3. **Review gVisor logs**: Check for syscall compatibility issues
 
 ## Security Best Practices
 
-1. **Always use container execution in production**
-2. **Regularly update Docker images** to patch vulnerabilities
+1. **Always use gVisor sandboxing in production**
+2. **Regularly update worker images** to patch vulnerabilities
 3. **Monitor resource usage** to detect anomalies
-4. **Review container logs** for suspicious activity
-5. **Use network isolation** (`none`) when tests don't need network
-6. **Keep Docker daemon secure** (proper permissions, updated)
-7. **Implement rate limiting** for test submissions
-8. **Monitor orphaned containers** and clean up regularly
+4. **Review execution logs** for suspicious activity
+5. **Use network isolation** when tests don't need network
+6. **Implement rate limiting** for test submissions
+7. **Monitor orphaned processes** and clean up regularly
 
 ## Contributing
 
@@ -381,7 +323,6 @@ When adding new features:
 
 ## References
 
-- [Docker Security](https://docs.docker.com/engine/security/)
-- [OWASP Container Security](https://owasp.org/www-project-docker-top-10/)
-- [CIS Docker Benchmark](https://www.cisecurity.org/benchmark/docker)
+- [gVisor Documentation](https://gvisor.dev/docs/)
 - [Playwright in Docker](https://playwright.dev/docs/docker)
+- [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/)

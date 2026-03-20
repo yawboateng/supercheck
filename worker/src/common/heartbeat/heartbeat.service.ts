@@ -47,6 +47,7 @@ export class HeartbeatService implements OnModuleInit, OnModuleDestroy {
       );
       const redisPort = this.configService.get<number>('REDIS_PORT', 6379);
       const redisPassword = this.configService.get<string>('REDIS_PASSWORD');
+      const redisUsername = this.configService.get<string>('REDIS_USERNAME');
       const tlsEnabled =
         this.configService.get<string>('REDIS_TLS_ENABLED') === 'true';
 
@@ -54,6 +55,7 @@ export class HeartbeatService implements OnModuleInit, OnModuleDestroy {
         host: redisHost,
         port: redisPort,
         password: redisPassword || undefined,
+        username: redisUsername || undefined,
         maxRetriesPerRequest: 3,
         enableReadyCheck: true,
         ...(tlsEnabled && {

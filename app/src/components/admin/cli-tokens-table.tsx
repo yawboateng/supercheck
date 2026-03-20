@@ -719,7 +719,11 @@ export function CliTokensTable() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8"
+                              className={`h-8 w-8 ${
+                                token.enabled
+                                  ? "text-green-600 bg-green-500/10 hover:bg-green-500/20 hover:text-green-700 dark:text-green-400 dark:bg-green-500/10 dark:hover:bg-green-500/20 dark:hover:text-green-300"
+                                  : "text-muted-foreground bg-muted/50 hover:bg-muted hover:text-foreground"
+                              }`}
                               onClick={() =>
                                 handleToggleEnabled(token.id, token.enabled)
                               }
@@ -730,9 +734,9 @@ export function CliTokensTable() {
                               {operationLoadingStates[token.id] === "toggle" ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
                               ) : token.enabled ? (
-                                <CheckCircle className="h-4 w-4 text-green-500" />
+                                <CheckCircle className="h-4 w-4" />
                               ) : (
-                                <Ban className="h-4 w-4 text-muted-foreground" />
+                                <Ban className="h-4 w-4" />
                               )}
                             </Button>
                           </TooltipTrigger>
@@ -745,7 +749,7 @@ export function CliTokensTable() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-red-600 hover:bg-red-500/10"
+                              className="h-8 w-8 text-red-600 bg-red-500/10 hover:bg-red-500/20 hover:text-red-700 dark:text-red-400 dark:bg-red-500/10 dark:hover:bg-red-500/20 dark:hover:text-red-300"
                               onClick={() => handleDelete(token.id)}
                               disabled={
                                 operationLoadingStates[token.id] === "delete"

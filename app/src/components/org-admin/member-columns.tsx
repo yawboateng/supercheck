@@ -370,9 +370,9 @@ const MemberActionsCell = ({
     <>
       <div className="flex items-center gap-2">
         <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-gray-50 hover:bg-gray-100 text-gray-600 hover:text-gray-700 border-gray-200 hover:border-gray-300 transition-all duration-200 rounded-md shadow-sm"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-blue-600 bg-blue-500/10 hover:bg-blue-500/20 hover:text-blue-700 dark:text-blue-400 dark:bg-blue-500/10 dark:hover:bg-blue-500/20 dark:hover:text-blue-300"
           onClick={handleEditAccess}
           title="Edit Access"
           disabled={loadingProjects}
@@ -384,9 +384,9 @@ const MemberActionsCell = ({
           )}
         </Button>
         <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 border-red-200 hover:border-red-300 transition-all duration-200 rounded-md shadow-sm"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-red-600 bg-red-500/10 hover:bg-red-500/20 hover:text-red-700 dark:text-red-400 dark:bg-red-500/10 dark:hover:bg-red-500/20 dark:hover:text-red-300"
           onClick={handleRemoveClick}
           title="Remove Member"
         >
@@ -548,9 +548,9 @@ const InvitationActionsCell = ({
     <>
       <div className="flex items-center gap-2">
         <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-blue-50 hover:bg-blue-100 text-blue-600 hover:text-blue-700 border-blue-200 hover:border-blue-300 transition-all duration-200 rounded-md shadow-sm"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-blue-600 bg-blue-500/10 hover:bg-blue-500/20 hover:text-blue-700 dark:text-blue-400 dark:bg-blue-500/10 dark:hover:bg-blue-500/20 dark:hover:text-blue-300"
           onClick={handleResendInvitation}
           disabled={resending}
           title="Resend Invitation"
@@ -562,9 +562,9 @@ const InvitationActionsCell = ({
           )}
         </Button>
         <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 border-red-200 hover:border-red-300 transition-all duration-200 rounded-md shadow-sm"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-red-600 bg-red-500/10 hover:bg-red-500/20 hover:text-red-700 dark:text-red-400 dark:bg-red-500/10 dark:hover:bg-red-500/20 dark:hover:text-red-300"
           onClick={() => setShowCancelDialog(true)}
           title="Cancel Invitation"
         >

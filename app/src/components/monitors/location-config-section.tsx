@@ -389,8 +389,7 @@ function LocationConfigSectionComponent({
                       <ul className="text-xs text-muted-foreground space-y-1">
                         <li>
                           • Monitoring from{" "}
-                          <strong>{selectedLocationCount}</strong> location
-                          {selectedLocationCount !== 1 ? "s" : ""}
+                          <strong>{selectedLocationCount}</strong> locations
                         </li>
                         <li>
                           • Status &quot;UP&quot; requires{" "}

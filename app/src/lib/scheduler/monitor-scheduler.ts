@@ -16,7 +16,7 @@ import {
 import type { LocationConfig, MonitorConfig, MonitoringLocation } from '@/db/schema';
 import { monitors, monitorResults } from '@/db/schema';
 import { db } from '@/utils/db';
-import { and, desc, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { EXECUTE_MONITOR_JOB_NAME } from './constants';
 import {
   partitionMonitorLocationsByAvailability,

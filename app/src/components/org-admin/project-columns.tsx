@@ -242,9 +242,9 @@ export function createProjectColumns(
           <div className="flex items-center h-10 gap-1">
             {onManageLocations && (
               <Button
-                variant="outline"
-                size="sm"
-                className="h-8 w-8 p-0 bg-gray-50 hover:bg-gray-100 text-gray-600 hover:text-gray-700 border-gray-200 hover:border-gray-300 transition-all duration-200 rounded-md shadow-sm"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 hover:text-emerald-700 dark:text-emerald-400 dark:bg-emerald-500/10 dark:hover:bg-emerald-500/20 dark:hover:text-emerald-300"
                 onClick={() => onManageLocations(project)}
                 title="Location restrictions"
               >
@@ -252,9 +252,9 @@ export function createProjectColumns(
               </Button>
             )}
             <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-8 p-0 bg-gray-50 hover:bg-gray-100 text-gray-600 hover:text-gray-700 border-gray-200 hover:border-gray-300 transition-all duration-200 rounded-md shadow-sm"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-blue-600 bg-blue-500/10 hover:bg-blue-500/20 hover:text-blue-700 dark:text-blue-400 dark:bg-blue-500/10 dark:hover:bg-blue-500/20 dark:hover:text-blue-300"
               onClick={() => {
                 if (onEditProject) {
                   onEditProject(project);

@@ -63,6 +63,7 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
   private config: QueueAlertingConfig;
   private state: QueueAlertingState;
   private checkInterval: NodeJS.Timeout | null = null;
+  private healthCheckInProgress = false;
   private readonly metricsHistoryLimit = 60; // Keep 60 samples (1 hour at 1-minute intervals)
 
   constructor(private readonly configService: ConfigService) {
@@ -383,25 +384,35 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
    * Run health check on all queues
    */
   private async runHealthCheck(): Promise<void> {
-    this.state.lastCheckTimestamp = new Date();
-    const alerts: QueueAlert[] = [];
-
-    await this.syncQueues();
-
-    for (const [name, queue] of this.queues) {
-      try {
-        const metrics = await this.collectQueueMetrics(name, queue);
-        this.updateMetricsHistory(name, metrics);
-
-        const queueAlerts = this.evaluateThresholds(metrics);
-        alerts.push(...queueAlerts);
-      } catch (error) {
-        this.logger.error(`Error collecting metrics for queue ${name}:`, error);
-      }
+    if (this.healthCheckInProgress) {
+      this.logger.debug('Health check already in progress, skipping this tick');
+      return;
     }
 
-    // Process alerts
-    await this.processAlerts(alerts);
+    this.healthCheckInProgress = true;
+    try {
+      this.state.lastCheckTimestamp = new Date();
+      const alerts: QueueAlert[] = [];
+
+      await this.syncQueues();
+
+      for (const [name, queue] of this.queues) {
+        try {
+          const metrics = await this.collectQueueMetrics(name, queue);
+          this.updateMetricsHistory(name, metrics);
+
+          const queueAlerts = this.evaluateThresholds(metrics);
+          alerts.push(...queueAlerts);
+        } catch (error) {
+          this.logger.error(`Error collecting metrics for queue ${name}:`, error);
+        }
+      }
+
+      // Process alerts
+      await this.processAlerts(alerts);
+    } finally {
+      this.healthCheckInProgress = false;
+    }
   }
 
   /**
