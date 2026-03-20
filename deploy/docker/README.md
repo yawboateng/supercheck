@@ -36,7 +36,7 @@ docker compose version
 curl -fsSL https://get.docker.com | sh
 ```
 
-> **Linux Required:** Supercheck uses sandboxed Kubernetes pods for test execution, which is only available on Linux.
+> **Linux Required:** Supercheck uses K3s and gVisor for sandboxed test execution, which require the Linux kernel. Only Linux servers (Ubuntu 22.04+, Debian 12+) are supported. macOS, Windows, and WSL2 are not supported.
 
 ---
 
@@ -120,7 +120,7 @@ sudo bash setup-k3s.sh
 
 This installs the execution sandbox, creates the `supercheck-execution` namespace with appropriate resource limits and network policies, and writes a restricted worker kubeconfig to `/etc/rancher/k3s/supercheck-worker.kubeconfig`.
 
-> **Linux host recommended:** Docker Engine on Linux is the supported production target. Docker Desktop adds an extra VM layer and is intended for evaluation only.
+> **Linux host required:** Docker Engine on a Linux server (Ubuntu 22.04+, Debian 12+) is the only supported target. macOS, Windows, and WSL2 are not supported because K3s and gVisor require the Linux kernel.
 
 ---
 

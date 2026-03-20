@@ -28,11 +28,16 @@ Deploy Supercheck on your own infrastructure. Self-hosted mode includes **unlimi
 | Requirement | Minimum |
 |-------------|---------|
 | Docker Engine | 20.10+ |
-| OS | Linux |
+| OS | Linux (Ubuntu 22.04+, Debian 12+) |
+| Architecture | x86_64 or arm64 |
 | CPU | 4 vCPU |
 | Memory | 8GB RAM |
 | Storage | 50GB |
 | Domain | Optional (required for HTTPS) |
+
+<Callout type="warn">
+**Linux only** — Supercheck uses [K3s](https://k3s.io) and [gVisor](https://gvisor.dev) for sandboxed test execution, which require the Linux kernel. macOS and Windows are not supported, including Docker Desktop and WSL2.
+</Callout>
 
 ## Services
 

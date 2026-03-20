@@ -10,8 +10,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Globe, MapPin, AlertCircle } from "lucide-react";
+import { Loader2, Globe, MapPin, AlertCircle, Monitor } from "lucide-react";
 import { toast } from "sonner";
 import { useLocations, type LocationData } from "@/hooks/use-locations";
 import {
@@ -176,22 +177,25 @@ export function ProjectLocationsDialog({
             <p className="text-sm">Failed to load restrictions. Close and try again.</p>
           </div>
         ) : (
-          <div className="space-y-3 max-h-[320px] overflow-y-auto py-2">
+          <div className="space-y-1 max-h-[320px] overflow-y-auto py-2">
             {/* "All Locations" option */}
-            <label className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-muted/50 transition-colors cursor-pointer">
+            <label className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-muted/50 transition-colors cursor-pointer">
               <Checkbox
                 checked={allSelected}
                 onCheckedChange={() => handleSelectAll()}
               />
-              <Globe className="h-4 w-4 text-muted-foreground" />
-              <div>
-                <span className="text-sm font-medium">
-                  All Locations (no restrictions)
-                </span>
+              <Globe className="h-4 w-4 text-blue-500" />
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium">All Locations</span>
               </div>
+              {allSelected && (
+                <Badge variant="secondary" className="text-[10px]">
+                  No restrictions
+                </Badge>
+              )}
             </label>
 
-            <div className="border-t" />
+            <div className="border-t mx-3" />
 
             {/* Individual location checkboxes */}
             {visibleLocations.map((location) => {
@@ -199,7 +203,7 @@ export function ProjectLocationsDialog({
               return (
                 <label
                   key={location.id}
-                  className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors ${
                     isDisabled
                       ? "opacity-50 cursor-not-allowed"
                       : "hover:bg-muted/50 cursor-pointer"
@@ -212,20 +216,33 @@ export function ProjectLocationsDialog({
                     }
                     disabled={isDisabled}
                   />
-                  <span className="text-base">{location.flag ?? "📍"}</span>
+                  <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted text-base shrink-0">
+                    {location.flag ?? <Monitor className="h-4 w-4 text-muted-foreground" />}
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium">
+                    <div className="text-sm font-medium leading-tight">
                       {location.name}
-                      {isDisabled && (
-                        <span className="ml-2 text-xs text-muted-foreground font-normal">
-                          (disabled)
-                        </span>
-                      )}
                     </div>
-                    <div className="text-xs text-muted-foreground">
+                    {location.region && (
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {location.region}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Badge variant="outline" className="text-[10px] font-mono">
                       {location.code}
-                      {location.region && ` · ${location.region}`}
-                    </div>
+                    </Badge>
+                    {location.isDefault && (
+                      <Badge variant="default" className="text-[10px]">
+                        Default
+                      </Badge>
+                    )}
+                    {isDisabled && (
+                      <Badge variant="destructive" className="text-[10px]">
+                        Disabled
+                      </Badge>
+                    )}
                   </div>
                 </label>
               );

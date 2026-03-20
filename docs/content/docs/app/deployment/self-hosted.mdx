@@ -16,8 +16,8 @@ Deploy Supercheck on a single server with Docker Compose.
       <Step>
         ### Install Docker
 
-        <Callout type="info">
-        A **Linux server** is required. Supercheck uses sandboxed Kubernetes pods for test execution, which is only available on Linux.
+        <Callout type="warn">
+        A **Linux server** is required (Ubuntu 22.04+, Debian 12+). Supercheck uses K3s and gVisor for sandboxed test execution, which require the Linux kernel. macOS, Windows, and WSL2 are not supported.
         </Callout>
 
         ```bash
@@ -46,7 +46,7 @@ Deploy Supercheck on a single server with Docker Compose.
         sudo bash setup-k3s.sh
         ```
 
-        This sets up the sandboxed execution environment for Playwright and K6 jobs.
+        This installs [K3s](https://k3s.io) with [gVisor](https://gvisor.dev) for sandboxed Playwright and K6 execution.
       </Step>
 
       <Step>
@@ -75,8 +75,8 @@ Deploy Supercheck on a single server with Docker Compose.
       <Step>
         ### Install Docker
 
-        <Callout type="info">
-        A **Linux server** is required. Supercheck uses sandboxed Kubernetes pods for test execution, which is only available on Linux.
+        <Callout type="warn">
+        A **Linux server** is required (Ubuntu 22.04+, Debian 12+). Supercheck uses K3s and gVisor for sandboxed test execution, which require the Linux kernel. macOS, Windows, and WSL2 are not supported.
         </Callout>
 
         ```bash
@@ -132,7 +132,7 @@ Deploy Supercheck on a single server with Docker Compose.
         sudo bash setup-k3s.sh
         ```
 
-        This sets up the sandboxed execution environment for Playwright and K6 jobs.
+        This installs [K3s](https://k3s.io) with [gVisor](https://gvisor.dev) for sandboxed Playwright and K6 execution.
       </Step>
 
       <Step>

@@ -46,6 +46,13 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+OS=$(uname -s)
+if [[ "$OS" != "Linux" ]]; then
+  error "This script requires Linux. K3s and gVisor do not support $OS."
+  error "Supercheck's sandboxed execution requires a Linux server (Ubuntu 22.04+, Debian 12+)."
+  exit 1
+fi
+
 ARCH=$(uname -m)
 if [[ "$ARCH" != "x86_64" ]] && [[ "$ARCH" != "aarch64" ]]; then
   error "Unsupported architecture: $ARCH (only x86_64 and aarch64 are supported)"
