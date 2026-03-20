@@ -50,8 +50,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ### Fixed
 - Fixed Playwright report loading performance. Implemented report caching across Playground, Runs, and Monitor views to prevent unnecessary re-fetching on tab switches
 - Prevented caching of error responses from report proxy to avoid stale missing-report states after uploads complete
-- Prevented setting a status page custom domain to `STATUS_PAGE_DOMAIN` or its subdomains, which would silently fail to route ([#253](https://github.com/supercheck-io/supercheck/issues/253))
-- Added catch-all Traefik routers to `docker-compose-secure.yml` and `docker-compose-external.yml` for custom domain support on status pages
 - Fixed false "Queue capacity limit reached" errors during Redis Sentinel failover
 - Improved self-hosted migration script performance and hardened database creation commands against SQL injection
 - Fixed worker Redis documentation to use correct `REDIS_HOST`, `REDIS_PORT`, and `REDIS_PASSWORD` variables instead of `REDIS_URL` for multi-location deployments ([#252](https://github.com/supercheck-io/supercheck/issues/252))
