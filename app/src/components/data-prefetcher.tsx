@@ -6,7 +6,6 @@ import { usePathname } from "next/navigation";
 import { useProjectContext } from "@/hooks/use-project-context";
 import { APP_CONFIG_QUERY_KEY, fetchAppConfig } from "@/hooks/use-app-config";
 import { ADMIN_STATUS_QUERY_KEY, fetchAdminStatus } from "@/hooks/use-admin-status";
-import { SUBSCRIPTION_STATUS_QUERY_KEY, fetchSubscriptionStatus } from "@/components/subscription-guard";
 import { getDashboardQueryKey, fetchDashboard } from "@/hooks/use-dashboard";
 import { getTestsListQueryKey } from "@/hooks/use-tests";
 import { getJobsListQueryKey } from "@/hooks/use-jobs";
@@ -42,7 +41,6 @@ export function DataPrefetcher() {
 
     prefetch(APP_CONFIG_QUERY_KEY, fetchAppConfig, STALE_TIME.INFINITE);
     prefetch(ADMIN_STATUS_QUERY_KEY, fetchAdminStatus, STALE_TIME.LONG);
-    prefetch(SUBSCRIPTION_STATUS_QUERY_KEY, fetchSubscriptionStatus, STALE_TIME.LONG);
   }, [queryClient]);
 
   useEffect(() => {

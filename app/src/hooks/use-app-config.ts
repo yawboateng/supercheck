@@ -63,9 +63,10 @@ export function useAppConfig() {
   const { data: config, isPending, isFetching, error, isFetched } = useQuery({
     queryKey: APP_CONFIG_QUERY_KEY,
     queryFn: fetchAppConfig,
-    // App config rarely changes, cache for 30 min but mark as stale immediately
-    // This allows showing cached data while refetching in background
-    staleTime: 0,
+    // App config reads only environment variables (no DB calls) and never changes
+    // at runtime. Use a long staleTime to avoid unnecessary refetches.
+    // DataPrefetcher also prefetches this with Infinity staleTime.
+    staleTime: 30 * 60 * 1000, // 30 min - matches global default
     gcTime: 30 * 60 * 1000,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,

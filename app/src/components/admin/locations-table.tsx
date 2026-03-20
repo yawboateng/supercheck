@@ -177,9 +177,6 @@ export function LocationsTable() {
                     <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
                       {loc.code}
                     </code>
-                    {loc.code === "local" && (
-                      <span className="ml-1.5 text-[10px] text-muted-foreground">(self-hosted)</span>
-                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
                     {loc.region || "—"}
