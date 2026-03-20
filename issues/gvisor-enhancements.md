@@ -1,124 +1,84 @@
-# Enhancement: gVisor Execution Hardening & Improvements
+# Sandboxed Execution with gVisor: Architecture & Hardening
 
-## Summary
+## Overview
 
-Improve the gVisor-based Kubernetes Job execution model in `ContainerExecutorService` with better resource management, observability, and security hardening.
+Since v1.3.0, Supercheck executes all Playwright and k6 tests inside **ephemeral Kubernetes Jobs** running under [gVisor](https://gvisor.dev/) (`runtimeClassName: gvisor`). This replaces the earlier Docker-socket-based execution model and represents a significant improvement in security, isolation, and operational control.
+
+This issue documents the motivation, trade-offs, and planned hardening for the gVisor execution model.
 
 ## Labels
 
-`enhancement`, `security`, `execution`, `gvisor`
+`enhancement`, `security`, `execution`, `gvisor`, `documentation`
 
-## Background
+## Why We Moved to gVisor
 
-Since v1.3.0, all Playwright and K6 test execution runs as ephemeral Kubernetes Jobs in the `supercheck-execution` namespace with `runtimeClassName: gvisor`. The current implementation works but has several areas where hardening and optimization would improve reliability, security posture, and operational visibility.
+### Previous Model: Docker Socket
 
-## Proposed Improvements
+Workers mounted the host Docker socket (`/var/run/docker.sock`) and spawned test containers as sibling containers using `docker run`. While simple to set up, this had fundamental limitations:
 
-### 1. Pod-Level Security Policy Enforcement
+- **Security risk** — Docker socket access grants root-equivalent privileges on the host. A compromised test could escape to the host via volume mounts or privileged containers.
+- **No kernel-level isolation** — Tests shared the host kernel with no syscall filtering. Malicious or buggy test code could impact other workloads.
+- **No resource boundaries** — No enforcement of CPU/memory limits per test execution at the orchestration level.
+- **Tight coupling** — Workers were bound to nodes with Docker installed; Kubernetes-native scheduling and affinity were not leveraged.
 
-**Priority:** High
+### Current Model: gVisor + Kubernetes Jobs
 
-Currently, execution pods use `runAsNonRoot: true` and `automountServiceAccountToken: false`, but lack a full `PodSecurityContext` / `SecurityContext` lockdown.
+Each test run creates a short-lived Kubernetes Job in a dedicated `supercheck-execution` namespace. Jobs use gVisor's `runsc` runtime, which interposes a userspace kernel (the "Sentry") between the test process and the host kernel.
 
-**Changes:**
-- Add `readOnlyRootFilesystem: true` with explicit `emptyDir` volume mounts for writable paths (`/tmp`, workspace)
-- Set `allowPrivilegeEscalation: false` on the execution container
-- Add `seccompProfile: { type: RuntimeDefault }` as defense-in-depth alongside gVisor
-- Drop all Linux capabilities: `capabilities: { drop: ["ALL"] }`
-- Set `runAsUser` / `runAsGroup` explicitly instead of relying on the image default
+**Key benefits:**
 
-**Files:** `worker/src/common/security/container-executor.service.ts` → `buildExecutionJob()`
+- **Kernel-level isolation** — gVisor intercepts all syscalls; test code never directly touches the host kernel, even if it attempts privilege escalation.
+- **Namespace-level security** — The execution namespace enforces the `restricted` Pod Security Standard (`runAsNonRoot`, no privilege escalation, no host access).
+- **Network segmentation** — NetworkPolicy denies access to the Kubernetes API server, cloud metadata endpoints, and internal services. Only outbound HTTP/HTTPS is permitted.
+- **Resource control** — LimitRange and ResourceQuota prevent runaway pods from exhausting cluster resources.
+- **No Docker socket** — Workers interact with the Kubernetes API only. No elevated host access is required.
+- **Unified execution model** — Both self-hosted (Docker Compose + K3s) and cloud deployments use the same Kubernetes Job execution backend.
 
-### 2. Network Policy for Execution Namespace
+### Trade-offs
 
-**Priority:** High
+| Concern | Docker Socket | gVisor + K8s Jobs |
+|---------|---------------|-------------------|
+| **Security** | Root-on-host via socket | Kernel-level syscall interception |
+| **Setup complexity** | Low (Docker only) | Higher (K3s/K8s + gVisor runtime) |
+| **Memory overhead** | Minimal | ~150 MB for gVisor Sentry + `/dev/shm` accounting |
+| **Pod startup latency** | Fast (container reuse) | Slightly higher (Job creation + scheduling) |
+| **Artifact extraction** | `docker cp` | `kubectl exec` + `tar` over WebSocket |
+| **Self-hosted support** | Docker Compose only | Docker Compose + local K3s |
 
-Execution pods currently inherit the default-allow network policy in `supercheck-execution`. Untrusted test code should have restricted network access.
+## Planned Hardening
 
-**Changes:**
-- Create a `NetworkPolicy` in `supercheck-execution` namespace that:
-  - Denies all egress by default
-  - Allows egress to the internet on ports 80/443 (tests need to hit external URLs)
-  - Blocks access to the Kubernetes API server, cloud metadata endpoints (169.254.169.254), and internal services
-  - Blocks egress to the worker namespace (`supercheck-workers`) and data namespace (`supercheck`)
-- Optional: Add a per-test `allowPrivateNetwork` flag for tests that need internal connectivity
+The following improvements are planned to further strengthen the execution model:
 
-**Files:** `deploy/k8s/base/network-policy-execution.yaml` (new), `deploy/k8s/base/kustomization.yaml`
+### High Priority
 
-### 3. Resource Quota & LimitRange for Execution Namespace
+1. **Full pod security lockdown** — Add `readOnlyRootFilesystem`, drop all Linux capabilities, set explicit `runAsUser`/`runAsGroup`, and add `seccompProfile: RuntimeDefault` as defense-in-depth alongside gVisor.
 
-**Priority:** Medium
+2. **Network policy refinement** — Review and tighten egress rules. Ensure execution pods cannot reach internal services, cloud metadata endpoints (169.254.169.254), or the worker/data namespaces.
 
-Prevent resource exhaustion from runaway test pods.
+### Medium Priority
 
-**Changes:**
-- Add a `LimitRange` in `supercheck-execution` to enforce default and max CPU/memory per pod
-- Add a `ResourceQuota` to cap the total number of concurrent execution pods and aggregate resource consumption
-- Derive quota values from `MAX_CONCURRENT_EXECUTIONS` and memory/CPU limit config
+3. **Pod lifecycle optimization** — Replace the current post-execution infinite sleep loop with a bounded wait and signal-based exit to reduce wasted pod runtime.
 
-**Files:** `deploy/k8s/base/execution-resource-limits.yaml` (new)
+4. **Resource quota tuning** — Align ResourceQuota and LimitRange values with `MAX_CONCURRENT_EXECUTIONS` config to prevent namespace-level resource exhaustion.
 
-### 4. Improved Pod Lifecycle & Exit Handling
+5. **Execution metrics** — Add Prometheus metrics for pod creation latency, execution duration, exit code distribution, timeout/cancellation rates, and artifact extraction failures.
 
-**Priority:** Medium
+### Low Priority
 
-The current wrapper script keeps the pod alive in an infinite `sleep` loop after execution completes so that logs and artifacts can be extracted. This wastes pod runtime until `activeDeadlineSeconds` (125s) expires.
+6. **Structured audit logging** — Emit JSON-formatted lifecycle events (created, started, completed, cancelled, timed out) with run ID correlation for the observability pipeline.
 
-**Changes:**
-- Replace the infinite sleep with a bounded wait (e.g., 30s) after writing the exit code file
-- Have the outer `waitForExecutionOutcome` send a signal or write a sentinel file to tell the pod it's safe to exit after log/artifact collection
-- Add `preStop` lifecycle hook to flush logs before termination
-
-**Files:** `worker/src/common/security/container-executor.service.ts` → `buildKubernetesWrapperScript()`
-
-### 5. Execution Metrics & Observability
-
-**Priority:** Medium
-
-Add Prometheus metrics for execution pod lifecycle events.
-
-**Changes:**
-- Track: pod creation latency, execution duration, exit code distribution, timeout rate, cancellation rate, artifact extraction failures
-- Expose via the worker's existing `/metrics` endpoint
-- Add Grafana dashboard for execution pod health
-
-**Files:** `worker/src/common/security/container-executor.service.ts`, `deploy/k8s/observability/`
-
-### 6. Audit Trail for Execution Jobs
-
-**Priority:** Low
-
-Log structured audit events for execution job lifecycle (created, started, completed, cancelled, timed-out, failed) with run ID correlation.
-
-**Changes:**
-- Emit structured JSON log entries at each lifecycle transition
-- Include: `runId`, `jobName`, `podName`, `exitCode`, `duration`, `timedOut`, `cancelled`
-- Integrate with existing Loki/Alloy log pipeline
-
-### 7. PodDisruptionBudget for Worker Pods
-
-**Priority:** Low
-
-Ensure graceful draining during node maintenance — worker pods should not be evicted while actively managing execution jobs.
-
-**Changes:**
-- Add `PodDisruptionBudget` for worker deployments (`minAvailable: 1` per location)
-- Ensure `terminationGracePeriodSeconds` on workers accounts for in-flight execution job completion
-
-**Files:** `deploy/k8s/base/worker-pdb.yaml` (new)
+7. **PodDisruptionBudget for workers** — Prevent worker eviction during active execution job management. Ensure `terminationGracePeriodSeconds` accounts for in-flight jobs.
 
 ## Acceptance Criteria
 
-- [ ] Execution pods run with full security context lockdown (read-only root, no privilege escalation, all capabilities dropped)
-- [ ] Network policy blocks execution pod access to internal services and metadata endpoints
+- [ ] Execution pods run with full security context lockdown
+- [ ] Network policy blocks access to internal services and metadata endpoints
 - [ ] Resource quotas prevent execution namespace exhaustion
-- [ ] Pod sleep loop is replaced with bounded wait + signal-based exit
-- [ ] Prometheus metrics track execution pod lifecycle
-- [ ] All changes are backward-compatible with self-hosted Docker Compose deployments (gVisor features degrade gracefully)
+- [ ] Pod lifecycle uses bounded wait instead of infinite sleep
+- [ ] All changes remain backward-compatible with self-hosted Docker Compose deployments
 
-## Related
+## Related Files
 
-- `worker/src/common/security/container-executor.service.ts` — main execution service
-- `deploy/k8s/base/network-policy-workers.yaml` — existing worker network policy
-- `deploy/k8s/base/worker-deployment.yaml` — worker deployment spec
-- Memory note: `/memories/repo/gvisor-execution-model.md`
+- `worker/src/common/security/container-executor.service.ts` — Main execution service
+- `deploy/k8s/base/` — Kubernetes manifests (gVisor RuntimeClass, RBAC, NetworkPolicy, ResourceQuota)
+- `deploy/k8s/base/execution-namespace.yaml` — Execution namespace with `restricted` PSS

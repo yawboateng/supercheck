@@ -7,28 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ## [1.3.3] - [Unreleased]
 
 ### Added
-- **Dynamic locations system** — Locations are now managed via the database instead of hardcoded constants. Super Admins can add, edit, and enable/disable locations from the admin dashboard. Workers dynamically discover regional queues from Redis and DB. Per-project location restrictions are available. Old hardcoded location constants (`MONITORING_LOCATIONS`, `REGIONS`, `K6_LOCATIONS`, `LOCATION_METADATA`) have been removed ([#248](https://github.com/supercheck-io/supercheck/issues/248), [#249](https://github.com/supercheck-io/supercheck/issues/249), [#250](https://github.com/supercheck-io/supercheck/issues/250))
+- **Dynamic locations system** — Locations are now database-managed instead of hardcoded constants. Super Admins can add, edit, and enable/disable locations from the admin dashboard. Workers dynamically discover regional queues. Per-project location restrictions are available ([#248](https://github.com/supercheck-io/supercheck/issues/248), [#249](https://github.com/supercheck-io/supercheck/issues/249), [#250](https://github.com/supercheck-io/supercheck/issues/250))
 
 ### Fixed
-- Fixed email notification test connection only sending to the first email address when multiple addresses are configured ([#269](https://github.com/supercheck-io/supercheck/issues/269))
-- Fixed monitor distributed execution writing a synthetic error result even when a real result was already persisted — a transient Redis/DB failure during coordination could overwrite a successful probe with `status: 'error'`, incorrectly marking the monitor as down
-- Fixed scheduler-level monitor outages bypassing alert evaluation — when all monitor queues are unavailable, `recordSchedulingFailure()` now writes a `monitor_results` row with consecutive failure tracking so alert thresholds increment correctly and notifications fire when workers recover
-- Fixed live log output duplication during Kubernetes log stream reconnects — `sinceSeconds: 5` replayed recent output into `onStdoutChunk`, causing duplicate lines in the user-visible streaming console. Live forwarding is now suppressed during the replay window
-- Fixed discovery retry loop in K6 and monitor dynamic worker services running indefinitely even after queue discovery stabilises — the loop now stops after 3 consecutive no-growth checks and the timeout handle is properly cleared in `onModuleDestroy()`
-- Fixed mid-run cancellations being recorded as generic failures instead of cancellations when the cancellation poller deletes the execution pod before `waitForExecutionOutcome` can read pod status
-- Fixed K6 run submissions being rejected with "No active worker" during the 30-second heartbeat refresh window after a worker starts consuming a new queue
-- Fixed `/api/locations/available` returning 500 when Redis heartbeat scan fails — the endpoint now gracefully degrades by marking all locations as offline instead of failing the entire response
-- Fixed Redis payload validation in admin location capacity counting to properly validate JSON structure before accessing nested properties
-- Fixed stale queue cleanup in K6 and monitor dynamic worker services to use `Promise.allSettled` so one queue removal failure doesn't prevent cleanup of remaining queues
-- Added debug logging for exit code read failures in Kubernetes execution pods
+- Improved monitor execution reliability — fixed race conditions in distributed result persistence, scheduler failure tracking, and alert evaluation during queue outages
+- Improved dynamic worker stability — fixed queue discovery retry loops, heartbeat timing windows, stale queue cleanup, and graceful degradation when Redis is unavailable ([#269](https://github.com/supercheck-io/supercheck/issues/269))
+- Fixed Kubernetes execution edge cases including log stream deduplication, cancellation status tracking, and exit code polling
 
 ### Security
-- Updated Next.js from 16.1.6 to 16.1.7 — fixes HTTP request smuggling in rewrites, CSRF bypass via null origin, DoS via unbounded postponed resume buffering, and HMR websocket CSRF bypass
-- Updated fast-xml-parser from 5.3.8 to 5.5.6 — fixes CVE-2026-26278 (numeric entity expansion bypassing entity expansion limits)
-- Added override for file-type ≥21.3.2 — fixes ZIP decompression bomb DoS and infinite loop in ASF parser
-- Added override for yauzl ≥3.2.1 — fixes off-by-one error
-- Added override for flatted ≥3.4.0 — fixes unbounded recursion DoS in parse() revive phase
-- Added override for ajv ^8 → 8.18.0 — fixes ReDoS when using `$data` option
+- Updated Next.js to 16.1.7 — fixes request smuggling, CSRF bypass, and DoS vulnerabilities
+- Patched fast-xml-parser, file-type, yauzl, flatted, and ajv for various CVEs and DoS vulnerabilities
 
 
 ## [1.3.2] - 2026-03-12

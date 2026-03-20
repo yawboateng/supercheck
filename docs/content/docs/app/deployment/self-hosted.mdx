@@ -293,7 +293,7 @@ docker compose -f docker-compose-secure.yml up -d
 | **Large** | 4 | 4 | 8 vCPU / 16GB |
 
 <Callout type="info">
-`RUNNING_CAPACITY` and `QUEUED_CAPACITY` are App-side gates. `WORKER_REPLICAS` controls actual worker containers. Keep `RUNNING_CAPACITY` equal to total replicas.
+`RUNNING_CAPACITY` and `QUEUED_CAPACITY` are App-side gates set on the **app service only** — do not set them on worker services. `WORKER_REPLICAS` controls the number of worker containers. Keep `RUNNING_CAPACITY` equal to the total number of worker replicas.
 </Callout>
 
 ### Backups
@@ -322,21 +322,20 @@ docker compose -f docker-compose-secure.yml up -d
 ## Architecture
 
 ```mermaid
-%%{init: {'themeVariables': { 'fontSize': '13px'}}}%%
 flowchart TB
     Users[Users / CI/CD] --> T[Traefik Proxy<br/>SSL / Load Balancer]
     T --> App[Next.js App<br/>UI + API]
-    
-    App --> DB[(PostgreSQL<br/>Primary DB)]
-    App --> Redis[(Redis + BullMQ<br/>Queue + Cache)]
-    App --> S3[(MinIO<br/>Artifacts)]
-    
-    Redis --> W1[Worker 1<br/>Playwright / k6 / Monitors]
-    Redis --> W2[Worker 2<br/>Playwright / k6 / Monitors]
-    Redis --> WN[Worker N<br/>Playwright / k6 / Monitors]
-    
-    W1 & W2 & WN --> DB
-    W1 & W2 & WN --> S3
+    App --> DB[(PostgreSQL<br/>Primary DB)] & Redis[(Redis + BullMQ<br/>Queue + Cache)] & S3[(MinIO<br/>Artifacts)]
+
+    Redis --> W1
+    Redis --> W2
+    Redis --> WN
+
+    subgraph SERVER["Single Server"]
+        W1[Worker 1<br/>WORKER_LOCATION=local] --> K3S_1[K3s + gVisor<br/>Sandboxed Execution]
+        W2[Worker 2<br/>WORKER_LOCATION=local] --> K3S_2[K3s + gVisor<br/>Sandboxed Execution]
+        WN[Worker N<br/>WORKER_LOCATION=local] --> K3S_N[K3s + gVisor<br/>Sandboxed Execution]
+    end
 
     style Users fill:#6366f1,stroke:#4338ca,color:#fff
     style T fill:#0ea5e9,stroke:#0369a1,color:#fff
@@ -347,7 +346,13 @@ flowchart TB
     style W1 fill:#10b981,stroke:#047857,color:#fff
     style W2 fill:#10b981,stroke:#047857,color:#fff
     style WN fill:#10b981,stroke:#047857,color:#fff
+    style K3S_1 fill:#059669,stroke:#047857,color:#fff
+    style K3S_2 fill:#059669,stroke:#047857,color:#fff
+    style K3S_N fill:#059669,stroke:#047857,color:#fff
+    style SERVER fill:none,stroke:#3b82f6,stroke-width:2px
 ```
+
+All services run on a single Linux server managed by Docker Compose. Workers consume jobs from Redis via BullMQ and execute each test as an ephemeral Kubernetes Job in a local [K3s](https://k3s.io) cluster, sandboxed with [gVisor](https://gvisor.dev/) for kernel-level isolation. Scale by increasing `WORKER_REPLICAS` or expanding to [multiple regions](/docs/app/deployment/multi-location).
 
 ---
 
