@@ -25,11 +25,11 @@ jest.mock("@/lib/auth-context", () => ({
 }));
 
 import { db } from "@/utils/db";
-import { shouldStreamTestStatusEvent } from "./route";
+import { shouldStreamTestStatusEvent } from "./route.helpers";
 import {
   fetchEventStatusReport,
   fetchInitialStatusReport,
-} from "./route";
+} from "./route.helpers";
 
 const mockReportsFindFirst = db.query.reports.findFirst as jest.Mock;
 const mockRunsFindFirst = db.query.runs.findFirst as jest.Mock;
