@@ -52,7 +52,7 @@ describe("project-locations actions", () => {
         userRole: "project_admin",
       },
     });
-    mockDb.query.projects.findFirst.mockResolvedValue({ id: targetProjectId });
+    (mockDb.query.projects.findFirst as jest.Mock).mockResolvedValue({ id: targetProjectId });
     mockHasPermission.mockResolvedValue(true);
   });
 
