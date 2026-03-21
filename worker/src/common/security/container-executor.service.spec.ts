@@ -107,7 +107,17 @@ describe('ContainerExecutorService', () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('invalid characters');
+      expect(result.error).toContain('must not escape the execution workspace');
+    });
+
+    it('rejects ensureDirectories paths outside the execution workspace', async () => {
+      const result = await service.executeInContainer(null, ['node'], {
+        ...defaultOptions,
+        ensureDirectories: ['/etc/supercheck'],
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('must stay within the execution workspace');
     });
 
     it('rejects extractFromContainer without extractToHost', async () => {
@@ -118,6 +128,17 @@ describe('ContainerExecutorService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Invalid extraction configuration');
+    });
+
+    it('rejects extractFromContainer paths outside the execution workspace', async () => {
+      const result = await service.executeInContainer(null, ['node'], {
+        ...defaultOptions,
+        extractFromContainer: '/etc/passwd',
+        extractToHost: '/tmp/output',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('extractFromContainer');
     });
   });
 
@@ -142,6 +163,16 @@ describe('ContainerExecutorService', () => {
       expect(result.success).toBe(false);
       expect(result.stderr).toContain('cpuLimit');
       expect(result.stderr).toContain('exceeds maximum');
+    });
+
+    it('rejects non-finite resource limits', async () => {
+      const result = await service.executeInContainer(null, ['node'], {
+        ...defaultOptions,
+        memoryLimitMb: Number.NaN,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.stderr).toContain('finite number');
     });
   });
 
@@ -419,6 +450,43 @@ describe('ContainerExecutorService', () => {
         { name: 'ndots', value: '1' },
         { name: 'timeout', value: '2' },
         { name: 'attempts', value: '3' },
+      ]);
+    });
+
+    it('ignores invalid custom DNS nameservers', () => {
+      const configuredService = new ContainerExecutorService(
+        {
+          get: jest.fn((key: string, defaultValue?: string) => {
+            const config: Record<string, string> = {
+              WORKER_IMAGE: 'ghcr.io/supercheck-io/worker:test',
+              EXECUTION_DNS_NAMESERVERS: '169.254.20.10,999.43.0.10',
+            };
+            return config[key] ?? defaultValue;
+          }),
+        } as any,
+        {
+          isCancelled: jest.fn().mockResolvedValue(false),
+          clearCancellationSignal: jest.fn().mockResolvedValue(undefined),
+        } as any,
+      );
+
+      const job = (configuredService as any).buildExecutionJob({
+        jobName: 'sc-exec-dns-invalid',
+        workspace: '/tmp/supercheck/run-123',
+        shellScript: "echo 'ok'",
+        workingDir: '/worker',
+        limits: {
+          valid: true,
+          memoryLimitMb: 512,
+          cpuLimit: 0.5,
+          timeoutMs: 30000,
+        },
+        options: defaultOptions,
+      });
+
+      expect(job.spec?.template.spec?.dnsPolicy).toBe('None');
+      expect(job.spec?.template.spec?.dnsConfig?.nameservers).toEqual([
+        '169.254.20.10',
       ]);
     });
 

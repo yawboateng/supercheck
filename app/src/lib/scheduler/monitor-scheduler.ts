@@ -19,6 +19,10 @@ import { db } from '@/utils/db';
 import { desc, eq } from 'drizzle-orm';
 import { EXECUTE_MONITOR_JOB_NAME } from './constants';
 import {
+  getFirstVisibleProjectRestrictionCode,
+} from '@/lib/location-registry';
+import {
+  isMonitorLocationResolutionError,
   partitionMonitorLocationsByAvailability,
   resolveDefaultMonitorLocations,
   resolveMonitorLocations,
@@ -47,6 +51,14 @@ export interface MonitorJobData {
 const COMPLETED_JOB_RETENTION = { count: 500, age: 24 * 3600 };
 const FAILED_JOB_RETENTION = { count: 1000, age: 7 * 24 * 3600 };
 
+function shouldRecordSchedulingFailure(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('no jobs enqueued') ||
+    errorMessage.includes('none of the expected locations') ||
+    isMonitorLocationResolutionError(errorMessage)
+  );
+}
+
 /**
  * Process a scheduled monitor trigger
  */
@@ -63,11 +75,11 @@ export async function processScheduledMonitor(
   try {
     await enqueueMonitorExecutionJobs(executionJobData, retryLimit);
   } catch (error) {
-    // When enqueue fails because no workers are available, generate a failed
-    // MonitorResult so the monitor's status reflects reality instead of
-    // falsely remaining "UP" indefinitely.
+    // When enqueue fails because monitor locations cannot be resolved or no
+    // workers are available, generate a failed MonitorResult so the monitor's
+    // status reflects reality instead of falsely remaining "UP" indefinitely.
     const errorMessage = error instanceof Error ? error.message : String(error);
-    if (errorMessage.includes('no jobs enqueued') || errorMessage.includes('none of the expected locations')) {
+    if (shouldRecordSchedulingFailure(errorMessage)) {
       await recordSchedulingFailure(executionJobData.monitorId, errorMessage);
     }
     throw error; // Re-throw so BullMQ marks the scheduler job as failed
@@ -187,8 +199,9 @@ async function recordSchedulingFailure(
       .where(eq(monitors.id, monitorId));
 
     // Determine a real location for the result row.
-    // Prefer DB-validated locations, then the last known result location, and
-    // only use `"local"` as the final degraded-install fallback.
+    // Prefer DB-validated locations, then explicit monitor locations, then
+    // project restrictions (even if disabled), then unrestricted defaults, and
+    // finally the last known result location.
     const monitor = await db.query.monitors.findFirst({
       where: eq(monitors.id, monitorId),
       columns: { config: true, projectId: true },
@@ -225,6 +238,12 @@ async function recordSchedulingFailure(
       location = configuredLocations[0] as MonitoringLocation;
     }
 
+    if (!location && monitor?.projectId) {
+      location = (await getFirstVisibleProjectRestrictionCode(
+        monitor.projectId
+      )) as MonitoringLocation | undefined;
+    }
+
     if (!location) {
       try {
         const defaultLocations = await resolveDefaultMonitorLocations(
@@ -240,7 +259,13 @@ async function recordSchedulingFailure(
       location = lastResult.location as MonitoringLocation;
     }
 
-    const fallbackLocation = location ?? ("local" as MonitoringLocation);
+    if (!location) {
+      logger.warn(
+        { monitorId, errorMessage },
+        "Scheduling failure — monitor marked as down without a result row because no valid location could be resolved"
+      );
+      return;
+    }
 
     const consecutiveFailureCount = lastResult && !lastResult.isUp
       ? (lastResult.consecutiveFailureCount ?? 0) + 1
@@ -253,7 +278,7 @@ async function recordSchedulingFailure(
     await db.insert(monitorResults).values({
       monitorId,
       checkedAt: now,
-      location: fallbackLocation,
+      location,
       status: 'error',
       isUp: false,
       isStatusChange,
@@ -268,7 +293,7 @@ async function recordSchedulingFailure(
 
     logger.warn(
       { monitorId, errorMessage, consecutiveFailureCount },
-      `Scheduling failure — monitor marked as down with result row (location=${fallbackLocation})`
+      `Scheduling failure — monitor marked as down with result row (location=${location})`
     );
   } catch (err) {
     logger.error(

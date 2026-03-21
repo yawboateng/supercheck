@@ -23,6 +23,9 @@ export type Location = typeof locations.$inferSelect;
  * self-hosted installations continue to work out of the box.
  */
 export const LOCAL_LOCATION_CODE = "local";
+export const PROJECT_RESTRICTED_LOCATIONS_DISABLED_ERROR =
+  "All restricted locations for this project are currently disabled. " +
+  "Enable at least one assigned location or remove the project restrictions.";
 
 /** Returns true when the "local" location should be excluded (i.e., cloud mode). */
 export function shouldExcludeLocal(): boolean {
@@ -54,6 +57,10 @@ interface ProjectLocationAvailability {
 
 type ProjectLocationRestriction = {
   locationId: string;
+  code: string;
+};
+
+type ProjectLocationRestrictionCode = {
   code: string;
 };
 
@@ -224,6 +231,29 @@ export async function getProjectAvailableLocationsWithMeta(
   return getProjectLocationAvailability(projectId);
 }
 
+/**
+ * Returns the first visible project restriction code, including disabled
+ * locations. This is used for scheduler failure reporting so a project with
+ * disabled-but-assigned locations can still be marked down against a real
+ * location instead of a synthetic fallback.
+ */
+export async function getFirstVisibleProjectRestrictionCode(
+  projectId: string
+): Promise<string | undefined> {
+  const restrictions = await db
+    .select({
+      code: locations.code,
+    })
+    .from(projectLocations)
+    .innerJoin(locations, eq(projectLocations.locationId, locations.id))
+    .where(eq(projectLocations.projectId, projectId))
+    .orderBy(asc(locations.sortOrder), asc(locations.createdAt));
+
+  return getVisibleProjectRestrictions<ProjectLocationRestrictionCode>(
+    restrictions
+  )[0]?.code;
+}
+
 export async function getFirstProjectAvailableLocationCode(
   projectId: string
 ): Promise<string> {
@@ -237,10 +267,7 @@ export async function getFirstProjectAvailableLocationCode(
   // If the project has explicit restrictions but all restricted locations are disabled,
   // do NOT fall through to the instance-wide default — that would bypass the restriction.
   if (hasRestrictions) {
-    throw new Error(
-      "All restricted locations for this project are currently disabled. " +
-        "Enable at least one assigned location or remove the project restrictions."
-    );
+    throw new Error(PROJECT_RESTRICTED_LOCATIONS_DISABLED_ERROR);
   }
 
   return getFirstDefaultLocationCode();

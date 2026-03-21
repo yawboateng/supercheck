@@ -14,7 +14,11 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, Globe, MapPin, AlertCircle, Monitor } from "lucide-react";
 import { toast } from "sonner";
-import { useLocations, type LocationData } from "@/hooks/use-locations";
+import {
+  useLocationInvalidation,
+  useLocations,
+  type LocationData,
+} from "@/hooks/use-locations";
 import {
   getProjectLocationRestrictions,
   setProjectLocationRestrictions,
@@ -34,6 +38,7 @@ export function ProjectLocationsDialog({
   projectName,
 }: ProjectLocationsDialogProps) {
   const { locations: allLocations, isLoading: locationsLoading } = useLocations();
+  const { invalidateAll } = useLocationInvalidation();
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [restrictionEntries, setRestrictionEntries] = React.useState<
     Array<{ locationId: string; code: string; name: string }>
@@ -140,6 +145,7 @@ export function ProjectLocationsDialog({
         idsToSave
       );
       if (result.success) {
+        invalidateAll();
         toast.success("Location restrictions updated");
         onOpenChange(false);
       } else {

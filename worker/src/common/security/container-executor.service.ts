@@ -365,14 +365,19 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    const normalizedOptions: ContainerExecutionOptions = {
+      ...options,
+    };
+
     // Validate additionalFiles keys — no path traversal, no absolute paths
     if (options.additionalFiles) {
-      for (const filePath of Object.keys(options.additionalFiles)) {
-        if (
-          filePath.includes('..') ||
-          filePath.startsWith('/') ||
-          !filePath
-        ) {
+      const sanitizedAdditionalFiles: Record<string, string> = {};
+      for (const [filePath, content] of Object.entries(options.additionalFiles)) {
+        const normalizedFilePath = this.normalizeRelativeWorkspacePath(
+          filePath,
+          'additional file path',
+        );
+        if (!normalizedFilePath.valid) {
           return {
             success: false,
             exitCode: 1,
@@ -380,10 +385,42 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
             stderr: `Invalid additional file path: ${filePath}`,
             duration: 0,
             timedOut: false,
-            error: 'Additional file path contains invalid characters',
+            error:
+              normalizedFilePath.error ||
+              'Additional file path contains invalid characters',
           };
         }
+        sanitizedAdditionalFiles[normalizedFilePath.normalized!] = content;
       }
+      normalizedOptions.additionalFiles = sanitizedAdditionalFiles;
+    }
+
+    if (options.ensureDirectories) {
+      const sanitizedEnsureDirectories: string[] = [];
+      for (const dirPath of options.ensureDirectories) {
+        const normalizedDirPath = this.normalizeWorkspaceScopedPath(
+          dirPath,
+          'ensure directory path',
+          { allowWorkspaceRoot: true },
+        );
+        if (!normalizedDirPath.valid) {
+          return {
+            success: false,
+            exitCode: 1,
+            stdout: '',
+            stderr: `Invalid ensure directory path: ${dirPath}`,
+            duration: 0,
+            timedOut: false,
+            error:
+              normalizedDirPath.error ||
+              'Ensure directory path contains invalid characters',
+          };
+        }
+        if (!sanitizedEnsureDirectories.includes(normalizedDirPath.normalized!)) {
+          sanitizedEnsureDirectories.push(normalizedDirPath.normalized!);
+        }
+      }
+      normalizedOptions.ensureDirectories = sanitizedEnsureDirectories;
     }
 
     // Validate extraction options
@@ -398,6 +435,28 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         timedOut: false,
         error: 'Invalid extraction configuration',
       };
+    }
+
+    if (options.extractFromContainer) {
+      const normalizedExtractPath = this.normalizeWorkspaceScopedPath(
+        options.extractFromContainer,
+        'extractFromContainer',
+        { allowWorkspaceRoot: true },
+      );
+      if (!normalizedExtractPath.valid) {
+        return {
+          success: false,
+          exitCode: 1,
+          stdout: '',
+          stderr: `Invalid extractFromContainer path: ${options.extractFromContainer}`,
+          duration: 0,
+          timedOut: false,
+          error:
+            normalizedExtractPath.error ||
+            'Invalid extractFromContainer path',
+        };
+      }
+      normalizedOptions.extractFromContainer = normalizedExtractPath.normalized;
     }
 
     // Default options
@@ -426,7 +485,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    return this.executeInKubernetes(command, options, validatedLimits);
+    return this.executeInKubernetes(command, normalizedOptions, validatedLimits);
   }
 
   private async ensureKubernetesClients(): Promise<void> {
@@ -1371,7 +1430,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
 
   private rewriteTmpPath(value: string, workspace: string): string {
     if (value.startsWith('/tmp/')) {
-      return `${workspace}/${value.slice(5)}`;
+      return this.resolveWorkspacePath(workspace, value);
     }
     if (value === '/tmp' || value === '/tmp/') {
       return workspace;
@@ -1456,13 +1515,104 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isPathWithinBase(candidatePath: string, basePath: string): boolean {
-    const relativePath = candidatePath.startsWith(basePath)
-      ? candidatePath.slice(basePath.length)
-      : null;
+    const normalizedBase = path.posix.normalize(basePath).replace(/\/+$/, '');
+    const normalizedCandidate = path.posix.normalize(candidatePath);
     return (
-      relativePath !== null &&
-      (relativePath.length === 0 || relativePath.startsWith('/'))
+      normalizedCandidate === normalizedBase ||
+      normalizedCandidate.startsWith(`${normalizedBase}/`)
     );
+  }
+
+  private normalizeRelativeWorkspacePath(
+    value: string,
+    label: string,
+  ): { valid: boolean; normalized?: string; error?: string } {
+    return this.normalizeWorkspaceScopedPath(value, label, {
+      allowAbsoluteTmp: false,
+      allowWorkspaceRoot: false,
+    });
+  }
+
+  private normalizeWorkspaceScopedPath(
+    value: string,
+    label: string,
+    options: { allowAbsoluteTmp?: boolean; allowWorkspaceRoot?: boolean } = {},
+  ): { valid: boolean; normalized?: string; error?: string } {
+    const { allowAbsoluteTmp = true, allowWorkspaceRoot = false } = options;
+
+    if (!value || typeof value !== 'string') {
+      return {
+        valid: false,
+        error: `${label} must be a non-empty string`,
+      };
+    }
+
+    if (/[\0\r\n]/.test(value)) {
+      return {
+        valid: false,
+        error: `${label} contains invalid control characters`,
+      };
+    }
+
+    const normalizedInput = path.posix.normalize(value.replace(/\\/g, '/'));
+    if (allowAbsoluteTmp && (normalizedInput === '/tmp' || normalizedInput.startsWith('/tmp/'))) {
+      return {
+        valid: true,
+        normalized: normalizedInput,
+      };
+    }
+
+    if (path.posix.isAbsolute(normalizedInput)) {
+      return {
+        valid: false,
+        error: `${label} must stay within the execution workspace`,
+      };
+    }
+
+    if (
+      normalizedInput === '..' ||
+      normalizedInput.startsWith('../')
+    ) {
+      return {
+        valid: false,
+        error: `${label} must not escape the execution workspace`,
+      };
+    }
+
+    if (normalizedInput === '.') {
+      return allowWorkspaceRoot
+        ? { valid: true, normalized: normalizedInput }
+        : {
+            valid: false,
+            error: `${label} must point to a child path inside the execution workspace`,
+          };
+    }
+
+    if (!normalizedInput || normalizedInput === '/') {
+      return {
+        valid: false,
+        error: `${label} must be a non-empty path`,
+      };
+    }
+
+    return {
+      valid: true,
+      normalized: normalizedInput,
+    };
+  }
+
+  private resolveWorkspacePath(workspace: string, containerPath: string): string {
+    const normalizedPath = path.posix.normalize(containerPath.replace(/\\/g, '/'));
+    if (normalizedPath === '/tmp' || normalizedPath === '/tmp/') {
+      return workspace;
+    }
+    if (normalizedPath.startsWith('/tmp/')) {
+      return path.posix.join(workspace, normalizedPath.slice('/tmp/'.length));
+    }
+    if (normalizedPath === '.') {
+      return workspace;
+    }
+    return path.posix.join(workspace, normalizedPath);
   }
 
   private parseExecutionNodeSelector(
@@ -1563,13 +1713,16 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       return undefined;
     }
 
-    const ipv4Re = /^(\d{1,3}\.){3}\d{1,3}$/;
-    const nameservers = trimmed
-      .split(',')
-      .map((ns) => ns.trim())
+    const nameservers = Array.from(
+      new Set(
+        trimmed
+          .split(',')
+          .map((ns) => ns.trim()),
+      ),
+    )
       .filter((ns) => {
         if (!ns) return false;
-        if (!ipv4Re.test(ns)) {
+        if (!this.isValidIpv4Address(ns)) {
           this.logger.warn(
             `Invalid nameserver IP in EXECUTION_DNS_NAMESERVERS: "${ns}"; skipping`,
           );
@@ -1579,6 +1732,21 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
       });
 
     return nameservers.length > 0 ? nameservers : undefined;
+  }
+
+  private isValidIpv4Address(value: string): boolean {
+    const octets = value.split('.');
+    if (octets.length !== 4) {
+      return false;
+    }
+
+    return octets.every((octet) => {
+      if (!/^\d{1,3}$/.test(octet)) {
+        return false;
+      }
+      const numericValue = Number.parseInt(octet, 10);
+      return numericValue >= 0 && numericValue <= 255;
+    });
   }
 
   // =====================================================================
@@ -1610,12 +1778,7 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         if (!dir || typeof dir !== 'string') {
           continue;
         }
-        // Relocate /tmp-rooted paths into the isolated workspace
-        const resolvedDir = dir.startsWith('/tmp/')
-          ? `${ws}/${dir.slice(5)}`
-          : dir === '/tmp'
-            ? ws
-            : dir;
+        const resolvedDir = this.resolveWorkspacePath(ws, dir);
         const escapedDir = resolvedDir.replace(/'/g, "'\\''");
         shellCommands.push(`mkdir -p '${escapedDir}'`);
       }
@@ -1647,10 +1810,10 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
         options.additionalFiles,
       )) {
         const encodedContent = Buffer.from(content).toString('base64');
-        const targetPath = `${ws}/${filePath}`;
+        const targetPath = path.posix.join(ws, filePath);
         const escapedTarget = targetPath.replace(/'/g, "'\\''");
         // Ensure parent directory exists for nested files
-        const parentDir = targetPath.substring(0, targetPath.lastIndexOf('/'));
+        const parentDir = path.posix.dirname(targetPath);
         if (parentDir && parentDir !== ws) {
           shellCommands.push(`mkdir -p '${parentDir.replace(/'/g, "'\\''")}'`);
         }
@@ -1708,6 +1871,16 @@ export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
     const MAX_TIMEOUT_MS = 3600000;
 
     const errors: string[] = [];
+
+    if (!Number.isFinite(limits.memoryLimitMb)) {
+      errors.push('memoryLimitMb must be a finite number');
+    }
+    if (!Number.isFinite(limits.cpuLimit)) {
+      errors.push('cpuLimit must be a finite number');
+    }
+    if (!Number.isFinite(limits.timeoutMs)) {
+      errors.push('timeoutMs must be a finite number');
+    }
 
     if (limits.memoryLimitMb < MIN_MEMORY_MB) {
       errors.push(

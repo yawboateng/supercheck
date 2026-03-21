@@ -5,7 +5,7 @@ import { projectLocations, locations } from "@/db/schema/locations";
 import { projects } from "@/db/schema/organization";
 import { eq, and, inArray, asc } from "drizzle-orm";
 import { requireProjectContext } from "@/lib/project-context";
-import { checkPermissionWithContext } from "@/lib/rbac/middleware";
+import { hasPermission } from "@/lib/rbac/middleware";
 import {
   getVisibleProjectRestrictions,
   invalidateLocationCache,
@@ -62,7 +62,10 @@ export async function getProjectLocationRestrictions(
       return { success: false, error: "Access denied" };
     }
 
-    const canView = checkPermissionWithContext("project", "view", context);
+    const canView = await hasPermission("project", "view", {
+      organizationId: context.organizationId,
+      projectId,
+    });
     if (!canView) {
       return { success: false, error: "Insufficient permissions" };
     }
@@ -108,26 +111,31 @@ export async function setProjectLocationRestrictions(
       return { success: false, error: "Access denied" };
     }
 
-    const canUpdate = checkPermissionWithContext("project", "update", context);
+    const canUpdate = await hasPermission("project", "update", {
+      organizationId: context.organizationId,
+      projectId,
+    });
     if (!canUpdate) {
       return { success: false, error: "Insufficient permissions to update project settings" };
     }
 
+    const uniqueLocationIds = Array.from(new Set(locationIds));
+
     // Validate all locations exist and are enabled
-    if (locationIds.length > 0) {
+    if (uniqueLocationIds.length > 0) {
       const validLocations = await db
         .select({ id: locations.id, code: locations.code })
         .from(locations)
         .where(
           and(
-            inArray(locations.id, locationIds),
+            inArray(locations.id, uniqueLocationIds),
             eq(locations.isEnabled, true)
           )
         );
 
       const visibleValidLocations = getVisibleProjectRestrictions(validLocations);
 
-      if (visibleValidLocations.length !== locationIds.length) {
+      if (visibleValidLocations.length !== uniqueLocationIds.length) {
         return {
           success: false,
           error: "Some locations are invalid, disabled, or unavailable in this hosting mode",
@@ -141,9 +149,9 @@ export async function setProjectLocationRestrictions(
         .delete(projectLocations)
         .where(eq(projectLocations.projectId, projectId));
 
-      if (locationIds.length > 0) {
+      if (uniqueLocationIds.length > 0) {
         await tx.insert(projectLocations).values(
-          locationIds.map((locationId) => ({
+          uniqueLocationIds.map((locationId) => ({
             projectId,
             locationId,
           }))

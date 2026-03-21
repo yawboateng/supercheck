@@ -151,7 +151,7 @@ fi
 # ─── Step 3: Configure containerd for gVisor ─────────────────────────────────
 
 CONTAINERD_CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
-CONTAINERD_TEMPLATE="${CONTAINERD_CONFIG_DIR}/config.toml.tmpl"
+CONTAINERD_TEMPLATE="${CONTAINERD_CONFIG_DIR}/config-v3.toml.tmpl"
 
 mkdir -p "$CONTAINERD_CONFIG_DIR"
 
@@ -160,12 +160,11 @@ if [[ -f "$CONTAINERD_TEMPLATE" ]] && grep -q "runsc" "$CONTAINERD_TEMPLATE"; th
 else
   log "Configuring containerd to use gVisor runtime..."
 
-  # IMPORTANT: config.toml.tmpl REPLACES the entire default K3s containerd
-  # config.  It must carry every setting K3s needs (root, state, snapshotter,
-  # CNI, registry mirror path, default runc runtime, etc.) plus the runsc
-  # runtime definition.  A minimal template that only defines runsc will
-  # silently drop snapshotter, registry mirrors, and other critical defaults,
-  # causing hard-to-debug failures (see GVISOR_MIGRATION bug #4).
+  # K3s 1.32+ runs containerd 2.x.  The supported customization path is a
+  # config-v3 template that extends K3s' built-in base template instead of
+  # copying the full rendered config into this script.  That keeps us aligned
+  # with upstream defaults (registry, snapshotter, CNI, pause image, etc.)
+  # while still adding the runsc runtime handler we need for gVisor.
   #
   # The shim binary is installed to /usr/local/bin.  To ensure containerd
   # discovers it regardless of its own PATH, we also symlink it into /usr/bin.
@@ -174,44 +173,10 @@ else
   fi
 
   cat > "$CONTAINERD_TEMPLATE" << 'TOML'
-# K3s containerd configuration — comprehensive template with gVisor runtime.
-# This file replaces the default K3s containerd config; every required
-# section must be present.
+{{ template "base" . }}
 
-version = 2
-
-[plugins."io.containerd.internal.v1.opt"]
-  path = "/var/lib/rancher/k3s/agent/containerd"
-
-[plugins."io.containerd.grpc.v1.cri"]
-  stream_server_address = "127.0.0.1"
-  stream_server_port = "10010"
-  enable_selinux = false
-  enable_unprivileged_ports = true
-  enable_unprivileged_icmp = true
-
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  snapshotter = "overlayfs"
-  disable_snapshot_annotations = true
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-  SystemdCgroup = true
-
-[plugins."io.containerd.grpc.v1.cri".cni]
-  bin_dir = "/var/lib/rancher/k3s/data/cni"
-  conf_dir = "/var/lib/rancher/k3s/agent/etc/cni/net.d"
-
-[plugins."io.containerd.grpc.v1.cri".registry]
-  config_path = "/var/lib/rancher/k3s/agent/etc/containerd/certs.d"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
-  TypeUrl = "io.containerd.runsc.v1.options"
 TOML
 
   log "containerd config written to $CONTAINERD_TEMPLATE"
@@ -253,6 +218,11 @@ overhead:
 scheduling:
   nodeSelector:
     gvisor.io/enabled: "true"
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: worker
+      effect: NoSchedule
 YAML
 
 # ─── Step 6: Create execution namespace + guardrails ─────────────────────────

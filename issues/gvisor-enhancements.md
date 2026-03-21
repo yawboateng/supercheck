@@ -49,15 +49,17 @@ Each test run creates a short-lived Kubernetes Job in a dedicated `supercheck-ex
 
 The following improvements are planned to further strengthen the execution model:
 
-### High Priority
+### Completed Hardening
 
-1. **Full pod security lockdown** — Add `readOnlyRootFilesystem`, drop all Linux capabilities, set explicit `runAsUser`/`runAsGroup`, and add `seccompProfile: RuntimeDefault` as defense-in-depth alongside gVisor.
+1. **Full execution-pod security lockdown** — Execution Jobs now run with `readOnlyRootFilesystem`, dropped capabilities, explicit non-root IDs, and `seccompProfile: RuntimeDefault` alongside gVisor.
 
-2. **Network policy refinement** — Review and tighten egress rules. Ensure execution pods cannot reach internal services, cloud metadata endpoints (169.254.169.254), or the worker/data namespaces.
+2. **Network policy refinement** — Execution pods now block private ranges, metadata endpoints, and link-local addresses while allowing only DNS and outbound TCP to public IPs.
+
+3. **Pod lifecycle optimization** — The post-execution pod wait is now bounded and exit-signal driven instead of an infinite sleep loop.
+
+### Remaining Improvements
 
 ### Medium Priority
-
-3. **Pod lifecycle optimization** — Replace the current post-execution infinite sleep loop with a bounded wait and signal-based exit to reduce wasted pod runtime.
 
 4. **Resource quota tuning** — Align ResourceQuota and LimitRange values with `MAX_CONCURRENT_EXECUTIONS` config to prevent namespace-level resource exhaustion.
 
@@ -71,10 +73,10 @@ The following improvements are planned to further strengthen the execution model
 
 ## Acceptance Criteria
 
-- [ ] Execution pods run with full security context lockdown
-- [ ] Network policy blocks access to internal services and metadata endpoints
+- [x] Execution pods run with full security context lockdown
+- [x] Network policy blocks access to internal services and metadata endpoints
 - [ ] Resource quotas prevent execution namespace exhaustion
-- [ ] Pod lifecycle uses bounded wait instead of infinite sleep
+- [x] Pod lifecycle uses bounded wait instead of infinite sleep
 - [ ] All changes remain backward-compatible with self-hosted Docker Compose deployments
 
 ## Related Files

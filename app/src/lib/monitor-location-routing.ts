@@ -5,8 +5,19 @@ import {
   getFirstDefaultLocationCode,
   getProjectAvailableLocationCodes,
   hasProjectLocationRestrictions,
+  PROJECT_RESTRICTED_LOCATIONS_DISABLED_ERROR,
 } from "@/lib/location-registry";
 import { getActiveWorkerQueueNames } from "@/lib/worker-registry";
+
+const MONITOR_CONFIGURED_LOCATIONS_UNAVAILABLE_PREFIX =
+  "Monitor has locations explicitly configured [";
+
+export function isMonitorLocationResolutionError(errorMessage: string): boolean {
+  return (
+    errorMessage === PROJECT_RESTRICTED_LOCATIONS_DISABLED_ERROR ||
+    errorMessage.startsWith(MONITOR_CONFIGURED_LOCATIONS_UNAVAILABLE_PREFIX)
+  );
+}
 
 /**
  * Resolve effective monitor locations from DB, with multi-tier fallback.
@@ -40,7 +51,7 @@ export async function resolveMonitorLocations(
 
   if (validLocations.length === 0) {
     throw new Error(
-      `Monitor has locations explicitly configured [${configuredLocations.join(", ")}] ` +
+      `${MONITOR_CONFIGURED_LOCATIONS_UNAVAILABLE_PREFIX}${configuredLocations.join(", ")}] ` +
         `but none are currently enabled${projectId ? " for this project" : ""}. ` +
         "Re-enable the locations or update the monitor's location configuration."
     );
@@ -75,9 +86,12 @@ export async function resolveDefaultMonitorLocations(
 
   if (projectId && (await hasProjectLocationRestrictions(projectId))) {
     const projectCodes = await getProjectAvailableLocationCodes(projectId);
+    if (projectCodes.length === 0) {
+      throw new Error(PROJECT_RESTRICTED_LOCATIONS_DISABLED_ERROR);
+    }
     const filtered = resolved.filter((location) => projectCodes.includes(location));
     if (filtered.length > 0) return filtered;
-    if (projectCodes.length > 0) return projectCodes;
+    return projectCodes;
   }
 
   return Array.from(new Set(resolved));
