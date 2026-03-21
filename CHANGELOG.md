@@ -4,7 +4,7 @@ All notable changes to Supercheck are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-## [1.3.3] - [Unreleased]
+## [1.3.3] - 2026-03-22
 
 > **⚠️ Breaking Change — New Execution Model**
 >
@@ -31,8 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 - Improved monitor execution reliability — fixed race conditions in distributed result persistence, scheduler failure tracking, and alert evaluation during queue outages
-- Improved dynamic worker stability — fixed queue discovery retry loops, heartbeat timing windows, stale queue cleanup, and graceful degradation when Redis is unavailable ([#269](https://github.com/supercheck-io/supercheck/issues/269))
+- Improved dynamic worker stability — fixed queue discovery retry loops, heartbeat timing windows, stale queue cleanup, and graceful degradation when Redis is unavailable
 - Fixed Kubernetes execution edge cases including log stream deduplication, cancellation status tracking, and exit code polling
+- Fixed multi-recipient alert email delivery for comma-separated email channels by sending messages sequentially over SMTP and reporting partial delivery failures accurately ([#269](https://github.com/supercheck-io/supercheck/issues/269))
 
 ### Security
 - **gVisor sandboxing** — All user-submitted test scripts now execute under gVisor's userspace kernel, replacing the previous shared-kernel Docker isolation

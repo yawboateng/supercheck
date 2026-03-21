@@ -112,6 +112,17 @@ interface FormattedNotification {
   timestamp: number;
 }
 
+interface NotificationSendResult {
+  success: boolean;
+  error?: string;
+}
+
+interface SmtpDeliveryResult {
+  sentCount: number;
+  failedRecipients: string[];
+  errors: Record<string, string>;
+}
+
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
@@ -124,19 +135,26 @@ export class NotificationService {
     provider: NotificationProvider,
     payload: NotificationPayload,
   ): Promise<boolean> {
+    const result = await this.sendNotificationDetailed(provider, payload);
+    return result.success;
+  }
+
+  private async sendNotificationDetailed(
+    provider: NotificationProvider,
+    payload: NotificationPayload,
+  ): Promise<NotificationSendResult> {
     this.logger.log(
       `Sending notification via ${provider.type} for ${payload.type}: ${payload.title}`,
     );
 
-    let success = false;
+    let result: NotificationSendResult = { success: false };
 
     try {
       // Validate provider configuration
       if (!this.validateProviderConfig(provider)) {
-        this.logger.error(
-          `Invalid configuration for provider ${provider.id} (${provider.type})`,
-        );
-        return false;
+        const error = `Invalid configuration for provider ${provider.id} (${provider.type})`;
+        this.logger.error(error);
+        return { success: false, error };
       }
 
       // Enhanced payload with standardized formatting
@@ -146,72 +164,88 @@ export class NotificationService {
       // Send the actual notification
       switch (provider.type) {
         case 'email':
-          success = await this.sendEmailNotification(
+          result = await this.sendEmailNotification(
             provider.config,
             formattedNotification,
             enhancedPayload,
           );
           break;
         case 'slack':
-          success = await this.sendSlackNotification(
-            provider.config,
-            formattedNotification,
-          );
+          result = {
+            success: await this.sendSlackNotification(
+              provider.config,
+              formattedNotification,
+            ),
+          };
           break;
         case 'webhook':
-          success = await this.sendWebhookNotification(
-            provider.config,
-            formattedNotification,
-            enhancedPayload,
-          );
+          result = {
+            success: await this.sendWebhookNotification(
+              provider.config,
+              formattedNotification,
+              enhancedPayload,
+            ),
+          };
           break;
         case 'telegram':
-          success = await this.sendTelegramNotification(
-            provider.config,
-            formattedNotification,
-          );
+          result = {
+            success: await this.sendTelegramNotification(
+              provider.config,
+              formattedNotification,
+            ),
+          };
           break;
         case 'discord':
-          success = await this.sendDiscordNotification(
-            provider.config,
-            formattedNotification,
-          );
+          result = {
+            success: await this.sendDiscordNotification(
+              provider.config,
+              formattedNotification,
+            ),
+          };
           break;
         case 'teams':
-          success = await this.sendTeamsNotification(
-            provider.config,
-            formattedNotification,
-          );
+          result = {
+            success: await this.sendTeamsNotification(
+              provider.config,
+              formattedNotification,
+            ),
+          };
           break;
         default: {
           const _exhaustiveCheck: never = provider.type;
-          this.logger.error(
-            `Unsupported notification provider type: ${String(provider.type)}`,
-          );
-          success = false;
+          const error = `Unsupported notification provider type: ${String(provider.type)}`;
+          this.logger.error(error);
+          result = { success: false, error };
           // Use exhaustive check to ensure all cases are handled
           return _exhaustiveCheck;
         }
       }
 
-      if (success) {
+      if (result.success) {
         this.logger.log(
           `Successfully sent notification via ${provider.type} for ${payload.type}`,
         );
       } else {
+        const errorSuffix = result.error ? `: ${result.error}` : '';
         this.logger.error(
-          `Failed to send notification via ${provider.type} for ${payload.type}`,
+          `Failed to send notification via ${provider.type} for ${payload.type}${errorSuffix}`,
         );
       }
     } catch (error) {
+      const errorMessage = getErrorMessage(error);
       this.logger.error(
         `Failed to send notification via ${provider.type}:`,
         error,
       );
-      success = false;
+      result = { success: false, error: errorMessage };
     }
 
-    return success;
+    return result.success
+      ? result
+      : {
+          success: false,
+          error: result.error ?? 'Notification send returned false',
+        };
   }
 
   private enhancePayload(payload: NotificationPayload): NotificationPayload {
@@ -473,18 +507,22 @@ export class NotificationService {
     this.logger.log(`Sending notifications to ${providers.length} providers`);
 
     const settledResults = await Promise.allSettled(
-      providers.map((provider) => this.sendNotification(provider, payload)),
+      providers.map((provider) =>
+        this.sendNotificationDetailed(provider, payload),
+      ),
     );
 
     const detailedResults = settledResults.map((result, index) => {
       const provider = providers[index];
 
       if (result.status === 'fulfilled') {
-        const success = Boolean(result.value);
+        const success = result.value.success;
         return {
           provider,
           success,
-          error: success ? undefined : 'Notification send returned false',
+          error: success
+            ? undefined
+            : (result.value.error ?? 'Notification send returned false'),
         };
       }
 
@@ -524,7 +562,7 @@ export class NotificationService {
     config: any,
     formatted: FormattedNotification,
     payload: NotificationPayload,
-  ): Promise<boolean> {
+  ): Promise<NotificationSendResult> {
     try {
       // Parse email addresses from config
       const emailAddresses = this.parseEmailAddresses(
@@ -585,27 +623,38 @@ export class NotificationService {
       );
 
       // Send via SMTP
-      const smtpSuccess = await this.trySMTPDelivery(
+      const smtpResult = await this.trySMTPDelivery(
         config,
         formatted,
         emailContent,
         emailAddresses,
       );
-      if (smtpSuccess) {
+      if (smtpResult.failedRecipients.length === 0) {
         this.logger.log(
-          `Email notification sent successfully via SMTP to ${emailAddresses.length} recipient(s)`,
+          `Email notification sent successfully via SMTP to ${smtpResult.sentCount} recipient(s)`,
         );
-        return true;
+        return { success: true };
       }
 
-      this.logger.error('SMTP email delivery failed');
-      return false;
+      if (smtpResult.sentCount === 0) {
+        const firstError =
+          smtpResult.errors[emailAddresses[0]] ?? 'SMTP delivery failed';
+        return {
+          success: false,
+          error: `SMTP delivery failed for all ${emailAddresses.length} recipient(s): ${firstError}`,
+        };
+      }
+
+      return {
+        success: false,
+        error: `SMTP delivery reached ${smtpResult.sentCount}/${emailAddresses.length} recipient(s); failed for: ${smtpResult.failedRecipients.join(', ')}`,
+      };
     } catch (error) {
       this.logger.error(
         `Failed to send email notification: ${getErrorMessage(error)}`,
         getErrorStack(error),
       );
-      return false;
+      return { success: false, error: getErrorMessage(error) };
     }
   }
 
@@ -648,7 +697,13 @@ export class NotificationService {
     formatted: FormattedNotification,
     emailContent: { html: string; text: string },
     emailAddresses: string[],
-  ): Promise<boolean> {
+  ): Promise<SmtpDeliveryResult> {
+    const failureResult = (error: string): SmtpDeliveryResult => ({
+      sentCount: 0,
+      failedRecipients: [...emailAddresses],
+      errors: Object.fromEntries(emailAddresses.map((email) => [email, error])),
+    });
+
     try {
       // Use environment variables for SMTP configuration
       const smtpHost = process.env.SMTP_HOST;
@@ -661,24 +716,23 @@ export class NotificationService {
       const fromEmail = process.env.SMTP_FROM_EMAIL;
 
       if (!smtpHost) {
-        this.logger.error(
-          'SMTP environment variable not configured (missing SMTP_HOST)',
-        );
-        return false;
+        const error =
+          'SMTP environment variable not configured (missing SMTP_HOST)';
+        this.logger.error(error);
+        return failureResult(error);
       }
 
       if (hasSmtpUser !== hasSmtpPassword) {
-        this.logger.error(
-          'SMTP authentication is partially configured (set both SMTP_USER and SMTP_PASSWORD, or leave both unset)',
-        );
-        return false;
+        const error =
+          'SMTP authentication is partially configured (set both SMTP_USER and SMTP_PASSWORD, or leave both unset)';
+        this.logger.error(error);
+        return failureResult(error);
       }
 
       if (!fromEmail) {
-        this.logger.error(
-          'SMTP sender not configured (missing SMTP_FROM_EMAIL)',
-        );
-        return false;
+        const error = 'SMTP sender not configured (missing SMTP_FROM_EMAIL)';
+        this.logger.error(error);
+        return failureResult(error);
       }
 
       const smtpConfig = {
@@ -704,27 +758,57 @@ export class NotificationService {
       const transporter = nodemailer.createTransport(smtpConfig);
 
       // Verify SMTP connection
-      await transporter.verify();
+      try {
+        await transporter.verify();
+      } catch (error) {
+        const errorMessage = getErrorMessage(error);
+        this.logger.error(
+          `SMTP connection verification failed: ${errorMessage}`,
+        );
+        return failureResult(errorMessage);
+      }
       this.logger.debug('SMTP connection verified successfully');
 
-      // Send to all email addresses
-      const sendPromises = emailAddresses.map((email) =>
-        transporter.sendMail({
-          from: fromEmail,
-          to: email,
-          subject: formatted.title,
-          html: emailContent.html,
-          text: emailContent.text,
-        }),
-      );
+      // Send to each email address sequentially to avoid SMTP rate-limiting
+      // and concurrent connection issues that cause only the first email to be delivered
+      let sentCount = 0;
+      const failedRecipients: string[] = [];
+      const errors: Record<string, string> = {};
 
-      await Promise.all(sendPromises);
-      return true;
+      for (const email of emailAddresses) {
+        try {
+          await transporter.sendMail({
+            from: fromEmail,
+            to: email,
+            subject: formatted.title,
+            html: emailContent.html,
+            text: emailContent.text,
+          });
+          sentCount++;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`SMTP delivery failed for ${email}: ${msg}`);
+          failedRecipients.push(email);
+          errors[email] = msg;
+        }
+      }
+
+      if (failedRecipients.length > 0) {
+        this.logger.warn(
+          `SMTP delivery: ${sentCount}/${emailAddresses.length} sent, failed for: ${failedRecipients.join(', ')}`,
+        );
+      }
+
+      return {
+        sentCount,
+        failedRecipients,
+        errors,
+      };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       this.logger.error(`SMTP delivery failed: ${errorMessage}`);
-      return false;
+      return failureResult(errorMessage);
     }
   }
 

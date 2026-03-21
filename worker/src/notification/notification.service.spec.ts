@@ -688,6 +688,37 @@ describe('NotificationService', () => {
 
       expect(result.results[0].error).toBeDefined();
     });
+
+    it('should mark partial email delivery as a provider failure', async () => {
+      const nodemailer = require('nodemailer');
+      const mockSendMail = jest
+        .fn()
+        .mockResolvedValueOnce({ messageId: 'msg-1' })
+        .mockRejectedValueOnce(new Error('Recipient rejected'));
+      (nodemailer.createTransport as jest.Mock).mockReturnValue({
+        verify: jest.fn().mockResolvedValue(true),
+        sendMail: mockSendMail,
+      });
+
+      const providers = [
+        {
+          ...emailProvider,
+          config: { emails: 'good@test.com, bad@test.com' },
+        },
+      ];
+
+      const result = await service.sendNotificationToMultipleProviders(
+        providers,
+        basePayload,
+      );
+
+      expect(result.success).toBe(0);
+      expect(result.failed).toBe(1);
+      expect(result.results[0]).toMatchObject({
+        success: false,
+      });
+      expect(result.results[0].error).toContain('bad@test.com');
+    });
   });
 
   // ==========================================================================
@@ -1055,6 +1086,78 @@ describe('NotificationService', () => {
       const result = await service.sendNotification(provider, basePayload);
 
       expect(result).toBe(true);
+    });
+
+    it('should send to ALL email addresses in comma-separated list', async () => {
+      const nodemailer = require('nodemailer');
+      const mockSendMail = jest
+        .fn()
+        .mockResolvedValue({ messageId: 'msg-123' });
+      (nodemailer.createTransport as jest.Mock).mockReturnValue({
+        verify: jest.fn().mockResolvedValue(true),
+        sendMail: mockSendMail,
+      });
+
+      const provider = {
+        ...emailProvider,
+        config: { emails: 'first@test.com, second@test.com, third@test.com' },
+      };
+
+      const result = await service.sendNotification(provider, basePayload);
+
+      expect(result).toBe(true);
+      expect(mockSendMail).toHaveBeenCalledTimes(3);
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'first@test.com' }),
+      );
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'second@test.com' }),
+      );
+      expect(mockSendMail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'third@test.com' }),
+      );
+    });
+
+    it('should fail if any configured email address fails to send', async () => {
+      const nodemailer = require('nodemailer');
+      const mockSendMail = jest
+        .fn()
+        .mockResolvedValueOnce({ messageId: 'msg-1' })
+        .mockRejectedValueOnce(new Error('Recipient rejected'))
+        .mockResolvedValueOnce({ messageId: 'msg-3' });
+      (nodemailer.createTransport as jest.Mock).mockReturnValue({
+        verify: jest.fn().mockResolvedValue(true),
+        sendMail: mockSendMail,
+      });
+
+      const provider = {
+        ...emailProvider,
+        config: { emails: 'good@test.com, bad@test.com, also-good@test.com' },
+      };
+
+      const result = await service.sendNotification(provider, basePayload);
+
+      expect(result).toBe(false);
+      expect(mockSendMail).toHaveBeenCalledTimes(3);
+    });
+
+    it('should fail if all emails fail to send', async () => {
+      const nodemailer = require('nodemailer');
+      const mockSendMail = jest.fn().mockRejectedValue(new Error('SMTP error'));
+      (nodemailer.createTransport as jest.Mock).mockReturnValue({
+        verify: jest.fn().mockResolvedValue(true),
+        sendMail: mockSendMail,
+      });
+
+      const provider = {
+        ...emailProvider,
+        config: { emails: 'a@test.com, b@test.com' },
+      };
+
+      const result = await service.sendNotification(provider, basePayload);
+
+      expect(result).toBe(false);
+      expect(mockSendMail).toHaveBeenCalledTimes(2);
     });
 
     it('should reject malformed email addresses', async () => {
