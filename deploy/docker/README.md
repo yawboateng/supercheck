@@ -124,6 +124,18 @@ This installs the execution sandbox, creates the `supercheck-execution` namespac
 
 ---
 
+## Upgrading
+
+```bash
+docker compose pull && \
+KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig \
+docker compose up -d
+```
+
+> **Upgrading to 1.3.3 from earlier versions:** This release replaces Docker socket-based execution with K3s + gVisor. Before upgrading, back up your database and run `sudo bash setup-k3s.sh` to install the execution sandbox. See the [deployment guide](https://supercheck.io/docs/app/deployment/self-hosted) for details.
+
+---
+
 ## Backups
 
 ```bash

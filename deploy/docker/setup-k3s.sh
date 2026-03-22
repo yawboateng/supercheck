@@ -11,7 +11,7 @@
 #   chmod +x setup-k3s.sh && sudo ./setup-k3s.sh
 #
 # Prerequisites:
-#   - Ubuntu 22.04+ or Debian 12+ (amd64)
+#   - Ubuntu 22.04+ or Debian 12+ (amd64/arm64)
 #   - Root/sudo access
 #   - Internet connectivity
 #
