@@ -98,42 +98,46 @@ Record Playwright tests directly from your browser:
 
 ## Architecture
 
-```
-                              ┌──────────────────────┐
-                              │   Users / CI/CD      │
-                              └──────────┬───────────┘
-                                         │
-                              ┌──────────▼───────────┐
-                              │   Traefik Proxy      │
-                              │   (SSL / LB)         │
-                              └──────────┬───────────┘
-                                         │
-                              ┌──────────▼───────────┐
-                              │   Next.js App        │
-                              │   (UI + API)         │
-                              └──────────┬───────────┘
-                                         │
-          ┌──────────────────────────────┼──────────────────────────────┐
-          │                              │                              │
-┌─────────▼─────────┐         ┌──────────▼───────────┐       ┌──────────▼─────────┐
-│    PostgreSQL     │         │   Redis + BullMQ     │       │   MinIO Storage    │
-│   (Primary DB)    │         │   (Queue + Cache)    │       │   (Artifacts)      │
-└───────────────────┘         └──────────┬───────────┘       └────────────────────┘
-                                         │
-                    ┌────────────────────┼────────────────────┐
-                    │                    │                    │
-          ┌─────────▼─────────┐ ┌────────▼────────┐ ┌─────────▼─────────┐
-          │  NestJS Worker 1  │ │ NestJS Worker 2 │ │  NestJS Worker N  │
-          └─────────┬─────────┘ └────────┬────────┘ └─────────┬─────────┘
-                    └────────────────────┼────────────────────┘
-                                         │
-                         ┌───────────────▼───────────────┐
-                         │  K3s + gVisor Sandbox         │
-                         │  (Ephemeral test execution)   │
-                         └───────────────────────────────┘
+```mermaid
+flowchart TB
+    Users[Users / CI/CD] --> T[Traefik Proxy<br/>SSL / Load Balancer]
+    T --> App[Next.js App<br/>UI + API]
+    App --> DB[(PostgreSQL<br/>Primary DB)] & Redis[(Redis + BullMQ<br/>Queue + Cache)] & S3[(MinIO<br/>Artifacts)]
+
+    Redis --> W_EU
+    Redis -.->|Internet| W_US
+    Redis -.->|Internet| W_APAC
+
+    subgraph PRIMARY["Primary Server"]
+        W_EU[Worker EU<br/>WORKER_LOCATION=eu-central] --> K3S_EU[K3s + gVisor<br/>Sandboxed Execution]
+    end
+
+    subgraph US["US VPS"]
+        W_US[Worker US<br/>WORKER_LOCATION=us-east] --> K3S_US[K3s + gVisor<br/>Sandboxed Execution]
+    end
+
+    subgraph APAC["Asia Pacific VPS"]
+        W_APAC[Worker APAC<br/>WORKER_LOCATION=asia-pacific] --> K3S_APAC[K3s + gVisor<br/>Sandboxed Execution]
+    end
+
+    style Users fill:#6366f1,stroke:#4338ca,color:#fff
+    style T fill:#0ea5e9,stroke:#0369a1,color:#fff
+    style App fill:#3b82f6,stroke:#1e40af,color:#fff
+    style DB fill:#f59e0b,stroke:#b45309,color:#fff
+    style Redis fill:#ef4444,stroke:#b91c1c,color:#fff
+    style S3 fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style W_EU fill:#10b981,stroke:#047857,color:#fff
+    style W_US fill:#10b981,stroke:#047857,color:#fff
+    style W_APAC fill:#10b981,stroke:#047857,color:#fff
+    style K3S_EU fill:#059669,stroke:#047857,color:#fff
+    style K3S_US fill:#059669,stroke:#047857,color:#fff
+    style K3S_APAC fill:#059669,stroke:#047857,color:#fff
+    style PRIMARY fill:none,stroke:#3b82f6,stroke-width:2px
+    style US fill:none,stroke:#64748b,stroke-width:2px,stroke-dasharray: 5 5
+    style APAC fill:none,stroke:#64748b,stroke-width:2px,stroke-dasharray: 5 5
 ```
 
-Docker Compose runs the app, worker, and data services. Each worker creates ephemeral Kubernetes Jobs in a local [K3s](https://k3s.io) cluster, sandboxed with [gVisor](https://gvisor.dev/) for kernel-level isolation. Scale by adding more worker replicas locally or in [other regions](https://supercheck.io/docs/app/deployment/multi-location).
+Each server runs its own local [K3s](https://k3s.io) cluster with [gVisor](https://gvisor.dev/) sandboxing. Workers consume jobs from Redis via BullMQ and execute each test as an ephemeral Kubernetes Job in a sandboxed execution namespace. Remote workers connect to the primary server's Redis, PostgreSQL, and MinIO over the network. Deploy workers in a [single location](https://supercheck.io/docs/app/deployment/self-hosted) or across [multiple regions](https://supercheck.io/docs/app/deployment/multi-location).
 
 ## Deployment
 

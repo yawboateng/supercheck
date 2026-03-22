@@ -6,6 +6,41 @@ icon: Container
 
 Deploy Supercheck on a single server with Docker Compose.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    Users[Users / CI/CD] --> T[Traefik Proxy<br/>SSL / Load Balancer]
+    T --> App[Next.js App<br/>UI + API]
+    App --> DB[(PostgreSQL<br/>Primary DB)] & Redis[(Redis + BullMQ<br/>Queue + Cache)] & S3[(MinIO<br/>Artifacts)]
+
+    Redis --> W1
+    Redis --> W2
+    Redis --> WN
+
+    subgraph SERVER["Single Server"]
+        W1[Worker 1<br/>WORKER_LOCATION=local] --> K3S_1[K3s + gVisor<br/>Sandboxed Execution]
+        W2[Worker 2<br/>WORKER_LOCATION=local] --> K3S_2[K3s + gVisor<br/>Sandboxed Execution]
+        WN[Worker N<br/>WORKER_LOCATION=local] --> K3S_N[K3s + gVisor<br/>Sandboxed Execution]
+    end
+
+    style Users fill:#6366f1,stroke:#4338ca,color:#fff
+    style T fill:#0ea5e9,stroke:#0369a1,color:#fff
+    style App fill:#3b82f6,stroke:#1e40af,color:#fff
+    style DB fill:#f59e0b,stroke:#b45309,color:#fff
+    style Redis fill:#ef4444,stroke:#b91c1c,color:#fff
+    style S3 fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style W1 fill:#10b981,stroke:#047857,color:#fff
+    style W2 fill:#10b981,stroke:#047857,color:#fff
+    style WN fill:#10b981,stroke:#047857,color:#fff
+    style K3S_1 fill:#059669,stroke:#047857,color:#fff
+    style K3S_2 fill:#059669,stroke:#047857,color:#fff
+    style K3S_N fill:#059669,stroke:#047857,color:#fff
+    style SERVER fill:none,stroke:#3b82f6,stroke-width:2px
+```
+
+All services run on a single Linux server managed by Docker Compose. Workers consume jobs from Redis via BullMQ and execute each test as an ephemeral Kubernetes Job in a local [K3s](https://k3s.io) cluster, sandboxed with [gVisor](https://gvisor.dev/) for kernel-level isolation. Scale by increasing `WORKER_REPLICAS` or expanding to [multiple regions](/docs/app/deployment/multi-location).
+
 ---
 
 ## Docker Compose
@@ -341,43 +376,6 @@ docker compose -f docker-compose-secure.yml up -d
 
 The worker container no longer requires the Docker socket. Existing tests and monitors continue to work without modification. If you have remote workers ([Multi-Location](/docs/app/deployment/multi-location)), run `setup-k3s.sh` on each remote server as well.
 </Callout>
-
----
-
-## Architecture
-
-```mermaid
-flowchart TB
-    Users[Users / CI/CD] --> T[Traefik Proxy<br/>SSL / Load Balancer]
-    T --> App[Next.js App<br/>UI + API]
-    App --> DB[(PostgreSQL<br/>Primary DB)] & Redis[(Redis + BullMQ<br/>Queue + Cache)] & S3[(MinIO<br/>Artifacts)]
-
-    Redis --> W1
-    Redis --> W2
-    Redis --> WN
-
-    subgraph SERVER["Single Server"]
-        W1[Worker 1<br/>WORKER_LOCATION=local] --> K3S_1[K3s + gVisor<br/>Sandboxed Execution]
-        W2[Worker 2<br/>WORKER_LOCATION=local] --> K3S_2[K3s + gVisor<br/>Sandboxed Execution]
-        WN[Worker N<br/>WORKER_LOCATION=local] --> K3S_N[K3s + gVisor<br/>Sandboxed Execution]
-    end
-
-    style Users fill:#6366f1,stroke:#4338ca,color:#fff
-    style T fill:#0ea5e9,stroke:#0369a1,color:#fff
-    style App fill:#3b82f6,stroke:#1e40af,color:#fff
-    style DB fill:#f59e0b,stroke:#b45309,color:#fff
-    style Redis fill:#ef4444,stroke:#b91c1c,color:#fff
-    style S3 fill:#8b5cf6,stroke:#6d28d9,color:#fff
-    style W1 fill:#10b981,stroke:#047857,color:#fff
-    style W2 fill:#10b981,stroke:#047857,color:#fff
-    style WN fill:#10b981,stroke:#047857,color:#fff
-    style K3S_1 fill:#059669,stroke:#047857,color:#fff
-    style K3S_2 fill:#059669,stroke:#047857,color:#fff
-    style K3S_N fill:#059669,stroke:#047857,color:#fff
-    style SERVER fill:none,stroke:#3b82f6,stroke-width:2px
-```
-
-All services run on a single Linux server managed by Docker Compose. Workers consume jobs from Redis via BullMQ and execute each test as an ephemeral Kubernetes Job in a local [K3s](https://k3s.io) cluster, sandboxed with [gVisor](https://gvisor.dev/) for kernel-level isolation. Scale by increasing `WORKER_REPLICAS` or expanding to [multiple regions](/docs/app/deployment/multi-location).
 
 ---
 
