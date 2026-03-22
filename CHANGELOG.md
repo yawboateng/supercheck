@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 > Please refer to the updated [self-hosted deployment guide](deploy/docker/README.md) for step-by-step upgrade instructions.
 
 ### Added
-- **Sandboxed execution with gVisor** — Test and monitor execution now runs inside gVisor-sandboxed Kubernetes pods, providing kernel-level isolation for all user-submitted scripts
+- **Sandboxed execution with gVisor** — Test and monitor execution now runs inside gVisor-sandboxed Kubernetes pods, providing kernel-level isolation for all user-submitted scripts ([#276](https://github.com/supercheck-io/supercheck/issues/276))
 - **Dynamic locations system** — Locations are now database-managed instead of hardcoded constants. Super Admins can add, edit, and enable/disable locations from the admin dashboard. Workers dynamically discover regional queues. Per-project location restrictions are available ([#248](https://github.com/supercheck-io/supercheck/issues/248), [#249](https://github.com/supercheck-io/supercheck/issues/249), [#250](https://github.com/supercheck-io/supercheck/issues/250))
 - **Multi-location deployment support** — Deploy workers across geographic regions using the new `docker-compose-worker.yml` template for distributed test execution
 
