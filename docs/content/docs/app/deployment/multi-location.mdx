@@ -23,15 +23,15 @@ flowchart TB
     Redis -.->|Internet| W_APAC
 
     subgraph PRIMARY["Primary Server"]
-        W_EU[Worker EU<br/>WORKER_LOCATION=eu-central] --> K3S_EU[K3s + gVisor<br/>Sandboxed Execution]
+        W_EU[Worker EU<br/>NestJS + BullMQ<br/>WORKER_LOCATION=eu-central] --> K3S_EU[K3s + gVisor<br/>Sandboxed Execution]
     end
 
-    subgraph US["US VPS"]
-        W_US[Worker US<br/>WORKER_LOCATION=us-east] --> K3S_US[K3s + gVisor<br/>Sandboxed Execution]
+    subgraph US["US Server"]
+        W_US[Worker US<br/>NestJS + BullMQ<br/>WORKER_LOCATION=us-east] --> K3S_US[K3s + gVisor<br/>Sandboxed Execution]
     end
 
-    subgraph APAC["Asia Pacific VPS"]
-        W_APAC[Worker APAC<br/>WORKER_LOCATION=asia-pacific] --> K3S_APAC[K3s + gVisor<br/>Sandboxed Execution]
+    subgraph APAC["Asia Pacific Server"]
+        W_APAC[Worker APAC<br/>NestJS + BullMQ<br/>WORKER_LOCATION=asia-pacific] --> K3S_APAC[K3s + gVisor<br/>Sandboxed Execution]
     end
 
     style Users fill:#6366f1,stroke:#4338ca,color:#fff

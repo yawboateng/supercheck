@@ -19,9 +19,9 @@ flowchart TB
     Redis --> WN
 
     subgraph SERVER["Single Server"]
-        W1[Worker 1<br/>WORKER_LOCATION=local] --> K3S_1[K3s + gVisor<br/>Sandboxed Execution]
-        W2[Worker 2<br/>WORKER_LOCATION=local] --> K3S_2[K3s + gVisor<br/>Sandboxed Execution]
-        WN[Worker N<br/>WORKER_LOCATION=local] --> K3S_N[K3s + gVisor<br/>Sandboxed Execution]
+        W1[Worker 1<br/>NestJS + BullMQ<br/>WORKER_LOCATION=local] --> K3S_1[K3s + gVisor<br/>Sandboxed Execution]
+        W2[Worker 2<br/>NestJS + BullMQ<br/>WORKER_LOCATION=local] --> K3S_2[K3s + gVisor<br/>Sandboxed Execution]
+        WN[Worker N<br/>NestJS + BullMQ<br/>WORKER_LOCATION=local] --> K3S_N[K3s + gVisor<br/>Sandboxed Execution]
     end
 
     style Users fill:#6366f1,stroke:#4338ca,color:#fff
