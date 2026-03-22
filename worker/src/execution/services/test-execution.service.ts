@@ -385,12 +385,18 @@ async function launchBrowserWithRetry(maxRetries = 3) {
       const browser = await chromium.launch({
         headless: true,
         args: [
-          // CRITICAL: Container compatibility
+          // Container compatibility
           '--disable-dev-shm-usage',
           '--disable-gpu',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
+
+          // GVISOR-007: --no-sandbox and --disable-setuid-sandbox removed.
+          // gVisor (runsc) provides syscall-level sandboxing at the container
+          // runtime layer, so Chromium's internal sandbox can remain enabled
+          // for defense-in-depth.
+          //
+          // --disable-web-security removed: it disables same-origin policy
+          // and is a security risk for untrusted page content. If cross-origin
+          // testing is needed, use Playwright's browserContext options instead.
 
           // Font rendering fixes
           '--font-render-hinting=none',
@@ -402,7 +408,6 @@ async function launchBrowserWithRetry(maxRetries = 3) {
           '--disable-extensions',
           '--disable-sync',
           '--no-first-run',
-          '--disable-gpu-sandbox',
           '--disable-accelerated-2d-canvas',
         ],
         timeout: 30000, // 30 second timeout for browser launch

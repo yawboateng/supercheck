@@ -1,36 +1,18 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
-import { drizzle, PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
-const postgres = require('postgres');
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import * as schema from './schema';
 import { eq } from 'drizzle-orm';
-import { getSSLConfig } from './db-ssl';
+import { DB_PROVIDER_TOKEN } from './db.constants';
 
 @Injectable()
-export class DbService implements OnModuleInit {
+export class DbService {
   private readonly logger = new Logger(DbService.name);
-  public db: PostgresJsDatabase<typeof schema>;
 
-  onModuleInit() {
-    this.logger.log('Initializing database connection...');
-    try {
-      const connectionString = process.env.DATABASE_URL!;
-      // Initialize with proper connection pooling
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
-      const queryClient = postgres(connectionString, {
-        ssl: getSSLConfig(),
-        max: parseInt(process.env.DB_POOL_MAX || '10', 10), // Default: 10 connections
-        idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || '30', 10), // Default: 30 seconds
-        connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || '10', 10), // Default: 10 seconds
-        max_lifetime: parseInt(process.env.DB_MAX_LIFETIME || '1800', 10), // Default: 30 minutes (in seconds)
-      });
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-      this.db = drizzle(queryClient, { schema });
-      this.logger.log('Database connection initialized successfully.');
-    } catch (error) {
-      this.logger.error('Failed to initialize database connection', error);
-      throw error;
-    }
+  constructor(
+    @Inject(DB_PROVIDER_TOKEN)
+    public readonly db: PostgresJsDatabase<typeof schema>,
+  ) {
+    this.logger.log('DbService initialized (shared connection pool).');
   }
 
   /**

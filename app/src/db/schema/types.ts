@@ -14,8 +14,8 @@ export type RequirementCreatedBy = "ai" | "user";
 export type RequirementCoverageStatus = "covered" | "failing" | "missing";
 export type RequirementDocumentType = "pdf" | "docx" | "md" | "text";
 
-// K6 Performance Testing types (includes global option for any location)
-export type K6Location = "us-east" | "eu-central" | "asia-pacific" | "global";
+// K6 Performance Testing types — location codes are dynamic strings from the locations table
+export type K6Location = string;
 
 // Job types
 export type JobType = "playwright" | "k6";
@@ -80,18 +80,11 @@ export type MonitorResultDetails = {
   [key: string]: unknown;
 };
 
-// Monitoring locations
-export const MONITORING_LOCATIONS = {
-  US_EAST: "us-east",
-  EU_CENTRAL: "eu-central",
-  ASIA_PACIFIC: "asia-pacific",
-} as const;
-
-export type MonitoringLocation =
-  (typeof MONITORING_LOCATIONS)[keyof typeof MONITORING_LOCATIONS];
+// Monitoring locations — location codes are dynamic strings from the locations table
+export type MonitoringLocation = string;
 
 export type LocationMetadata = {
-  code: MonitoringLocation;
+  code: string;
   name: string;
   region: string;
   coordinates?: { lat: number; lon: number };
@@ -100,7 +93,7 @@ export type LocationMetadata = {
 
 export type LocationConfig = {
   enabled: boolean;
-  locations: MonitoringLocation[];
+  locations: string[];
   threshold: number;
   strategy?: "all" | "majority" | "any";
 };

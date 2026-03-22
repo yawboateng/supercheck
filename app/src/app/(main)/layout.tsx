@@ -15,13 +15,14 @@ import { ProjectContextProvider, type ProjectContext } from "@/hooks/use-project
 import { NavUser } from "@/components/nav-user";
 import { DemoBadge } from "@/components/demo-badge";
 import { CommunityLinks } from "@/components/community-links";
-import { SubscriptionGuard } from "@/components/subscription-guard";
+import { SubscriptionGuard, type SubscriptionStatus } from "@/components/subscription-guard";
 import { AuthGuard } from "@/components/auth-guard";
 import { DataPrefetcher } from "@/components/data-prefetcher";
 import { MonacoPrefetcher } from "@/components/monaco-prefetcher";
 import { RecorderAutoConnect } from "@/components/recorder/RecorderAutoConnect";
 import { getCurrentUser, getActiveOrganization, getUserProjects } from "@/lib/session";
 import { getCurrentProjectContext } from "@/lib/project-context";
+import { isSelfHosted } from "@/lib/feature-flags";
 
 export default async function MainLayout({
   children,
@@ -43,8 +44,20 @@ export default async function MainLayout({
   let initialProjects: ProjectContext[] = [];
   let initialCurrentProject: ProjectContext | null = null;
   let initialSession: { user: { id: string; name: string; email: string; image?: string | null } } | null = null;
+  let initialSubscriptionStatus: SubscriptionStatus | null = null;
+  const initialIsSelfHosted = isSelfHosted();
 
   if (user && org) {
+    // Derive subscription status from org data already fetched (avoids client-side API call)
+    if (initialIsSelfHosted) {
+      initialSubscriptionStatus = { isActive: true, plan: "unlimited" };
+    } else {
+      const hasValidPlan = org.subscriptionPlan === "plus" || org.subscriptionPlan === "pro";
+      initialSubscriptionStatus = {
+        isActive: hasValidPlan && org.subscriptionStatus === "active",
+        plan: hasValidPlan ? org.subscriptionPlan! : null,
+      };
+    }
     try {
       const [projectsResult, currentProjectResult] = await Promise.all([
         getUserProjects(user.id, org.id),
@@ -119,7 +132,10 @@ export default async function MainLayout({
                   </div>
                 </header>
                 <main className="flex-1 flex-col gap-4 overflow-y-auto">
-                  <SubscriptionGuard>
+                  <SubscriptionGuard
+                    initialSubscriptionStatus={initialSubscriptionStatus}
+                    initialIsSelfHosted={initialIsSelfHosted}
+                  >
                     {children}
                   </SubscriptionGuard>
                 </main>

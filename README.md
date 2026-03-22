@@ -5,8 +5,7 @@
 The unified platform for AI-powered Playwright testing, multi-region k6 load testing, uptime monitoring, and subscriber-ready status pages.
 
 [![Website](https://img.shields.io/badge/Website-supercheck.io-orange?logo=firefox)](https://supercheck.io)
-[![Deploy with Coolify](https://img.shields.io/badge/Deploy%20with-Coolify-6B16ED?logo=coolify&logoColor=white)](./deploy/coolify/README.md)
-[![Deploy with Docker](https://img.shields.io/badge/Deploy%20with-Docker%20Compose-2496ED?logo=docker&logoColor=white)](https://supercheck.io/docs/app/deployment/self-hosted)
+[![Self-Host](https://img.shields.io/badge/Self--Host-Docker%20Compose%20+%20K3s-2496ED?logo=docker&logoColor=white)](https://supercheck.io/docs/app/deployment/self-hosted)
 [![npm](https://img.shields.io/npm/v/@supercheck/cli?logo=npm&label=Supercheck%20CLI)](https://www.npmjs.com/package/@supercheck/cli)
 [![Testing](https://img.shields.io/badge/Testing-Playwright-45ba4b?logo=googlechrome&logoColor=white)](https://playwright.dev)
 [![Load Testing](https://img.shields.io/badge/Load%20Testing-Grafana%20k6-7D64FF?logo=k6)](https://k6.io)
@@ -78,6 +77,12 @@ Supercheck combines **test automation**, **synthetic + uptime monitoring**, **pe
 - **API Keys** — Programmatic access
 - **Audit Trails** — Change and action history
 
+### Execution Security
+
+- **gVisor Sandboxing** — Test execution runs in ephemeral Kubernetes Jobs under gVisor for kernel-level syscall isolation
+- **Network Segmentation** — Execution pods are restricted from accessing internal services and cloud metadata endpoints
+- **Resource Quotas** — Per-namespace limits prevent runaway test pods from exhausting cluster resources
+
 ### Requirements Management
 
 - **AI extraction** from requirement documents (PDF, DOCX, text)
@@ -119,22 +124,24 @@ Record Playwright tests directly from your browser:
                     │                    │                    │
           ┌─────────▼─────────┐ ┌────────▼────────┐ ┌─────────▼─────────┐
           │  NestJS Worker 1  │ │ NestJS Worker 2 │ │  NestJS Worker N  │
-          │  ┌─────────────┐  │ │ ┌─────────────┐ │ │  ┌─────────────┐  │
-          │  │ Playwright  │  │ │ │ Playwright  │ │ │  │ Playwright  │  │
-          │  │ k6 Load     │  │ │ │ k6 Load     │ │ │  │ k6 Load     │  │
-          │  │ Monitors    │  │ │ │ Monitors    │ │ │  │ Monitors    │  │
-          │  └─────────────┘  │ │ └─────────────┘ │ │  └─────────────┘  │
-          └───────────────────┘ └─────────────────┘ └───────────────────┘
+          └─────────┬─────────┘ └────────┬────────┘ └─────────┬─────────┘
+                    └────────────────────┼────────────────────┘
+                                         │
+                         ┌───────────────▼───────────────┐
+                         │  K3s + gVisor Sandbox         │
+                         │  (Ephemeral test execution)   │
+                         └───────────────────────────────┘
 ```
+
+Docker Compose runs the app, worker, and data services. Each worker creates ephemeral Kubernetes Jobs in a local [K3s](https://k3s.io) cluster, sandboxed with [gVisor](https://gvisor.dev/) for kernel-level isolation. Scale by adding more worker replicas locally or in [other regions](https://supercheck.io/docs/app/deployment/multi-location).
 
 ## Deployment
 
-Self-host Supercheck on your own infrastructure:
+Self-host Supercheck on your own infrastructure. Docker Compose handles the app, worker, and data services while a local K3s cluster provides gVisor-sandboxed test execution:
 
 | Option | Description | Guide |
 |--------|-------------|-------|
-| [![Deploy with Coolify](https://img.shields.io/badge/Deploy%20with-Coolify-6B16ED?logo=coolify&logoColor=white)](./deploy/coolify/README.md) | One-click deployment on [Coolify](https://coolify.io) | [Read guide](./deploy/coolify/README.md) |
-| [![Deploy with Docker](https://img.shields.io/badge/Deploy%20with-Docker%20Compose-2496ED?logo=docker&logoColor=white)](https://supercheck.io/docs/app/deployment/self-hosted) | Docker Compose self-hosted deployment | [Read guide](https://supercheck.io/docs/app/deployment/self-hosted) |
+| [![Deploy with Docker](https://img.shields.io/badge/Deploy%20with-Docker%20Compose%20+%20K3s-2496ED?logo=docker&logoColor=white)](https://supercheck.io/docs/app/deployment/self-hosted) | Docker Compose + K3s self-hosted deployment | [Read guide](https://supercheck.io/docs/app/deployment/self-hosted) |
 
 ## Documentation
 
@@ -146,6 +153,7 @@ Official docs:
 - [Monitor](https://supercheck.io/docs/app/monitor)
 - [Communicate (Alerts, Status Pages)](https://supercheck.io/docs/app/communicate)
 - [Admin](https://supercheck.io/docs/app/admin)
+- [CLI Reference](https://supercheck.io/docs/app/cli)
 
 ## Supercheck CLI
 

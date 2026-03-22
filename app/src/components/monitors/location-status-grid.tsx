@@ -6,10 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Globe, TrendingUp, TrendingDown, Activity, Clock } from "lucide-react";
 import {
-  getLocationMetadata,
   getLocationHealthColor,
+  buildLocationMetadataMap,
 } from "@/lib/location-service";
 import type { MonitoringLocation } from "@/lib/location-service";
+import { useLocations } from "@/hooks/use-locations";
 
 interface LocationStat {
   location: MonitoringLocation;
@@ -44,6 +45,22 @@ export function LocationStatusGrid({
   const [stats, setStats] = useState<LocationStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { locations: dynamicLocations } = useLocations();
+
+  // Build a metadata map from dynamic locations
+  const metadataMap = React.useMemo(() => {
+    if (dynamicLocations.length > 0) {
+      return buildLocationMetadataMap(dynamicLocations);
+    }
+    return {};
+  }, [dynamicLocations]);
+
+  const getMetadata = React.useCallback(
+    (code: string) => {
+      return metadataMap[code];
+    },
+    [metadataMap]
+  );
 
   useEffect(() => {
     const fetchLocationStats = async () => {
@@ -144,7 +161,7 @@ export function LocationStatusGrid({
       <CardContent>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {stats.map((stat) => {
-            const metadata = getLocationMetadata(stat.location);
+            const metadata = getMetadata(stat.location);
             const healthColor = getLocationHealthColor(stat.uptimePercentage);
             const isUp = stat.latest?.isUp || false;
 

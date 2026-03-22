@@ -19,6 +19,7 @@ import { FormValues } from "./monitor-form";
 import { DEFAULT_LOCATION_CONFIG } from "@/lib/location-service";
 import type { LocationConfig } from "@/lib/location-service";
 import { useAppConfig } from "@/hooks/use-app-config";
+import { useAvailableLocations } from "@/hooks/use-locations";
 import { useQueryClient } from "@tanstack/react-query";
 import { MONITORS_QUERY_KEY } from "@/hooks/use-monitors";
 import { Loader2, SaveIcon } from "lucide-react";
@@ -39,6 +40,11 @@ export function MonitorCreationWizard() {
   const searchParams = useSearchParams();
   const stepFromUrl = searchParams?.get("wizardStep") as WizardStep | null;
   const { maxMonitorNotificationChannels } = useAppConfig();
+
+  // Check if multiple locations are available — skip location step when only one
+  const { locations: dynamicLocations, isLoading: locationsLoading } =
+    useAvailableLocations();
+  const hasMultipleLocations = dynamicLocations.length > 1;
 
   // Track if component is mounted to avoid state updates after unmount
   const isMountedRef = useRef(true);
@@ -188,6 +194,18 @@ export function MonitorCreationWizard() {
 
   // Sync URL with current step
   useEffect(() => {
+    // Skip location step if only 1 location is available.
+    // Wait until locations have loaded to avoid premature skip.
+    if (
+      currentStep === "location" &&
+      !locationsLoading &&
+      !hasMultipleLocations
+    ) {
+      const timeoutId = window.setTimeout(() => {
+        setCurrentStep("alerts");
+      }, 0);
+      return () => clearTimeout(timeoutId);
+    }
     const params = new URLSearchParams(window.location.search);
     if (currentStep === "monitor") {
       params.delete("wizardStep");
@@ -198,7 +216,7 @@ export function MonitorCreationWizard() {
       ? `?${params.toString()}`
       : window.location.pathname;
     router.replace(newUrl, { scroll: false });
-  }, [currentStep, router]);
+  }, [currentStep, locationsLoading, hasMultipleLocations, router]);
 
   // Clear draft data
   const clearDraft = useCallback(() => {
@@ -240,7 +258,23 @@ export function MonitorCreationWizard() {
     // Store the form data for state persistence and API data for creation
     setMonitorData(formData);
     setApiData(monitorApiData);
-    setCurrentStep("location");
+
+    // When skipping the location step (single location), auto-set the
+    // locationConfig to the actual available location. DEFAULT_LOCATION_CONFIG
+    // has an empty locations array; this ensures the DB config contains the
+    // real location code for the single-location case.
+    if (!locationsLoading && !hasMultipleLocations && dynamicLocations.length === 1) {
+      setLocationConfig({
+        enabled: false,
+        locations: [dynamicLocations[0].code],
+        threshold: 50,
+        strategy: "majority",
+      });
+    }
+
+    setCurrentStep(
+      locationsLoading || hasMultipleLocations ? "location" : "alerts"
+    );
   };
 
   const handleLocationNext = () => {
@@ -252,7 +286,7 @@ export function MonitorCreationWizard() {
   };
 
   const handleBackFromAlerts = () => {
-    setCurrentStep("location");
+    setCurrentStep(hasMultipleLocations ? "location" : "monitor");
   };
 
   const handleCancel = () => {
@@ -380,6 +414,7 @@ export function MonitorCreationWizard() {
           onSave={handleMonitorNext}
           onCancel={handleCancel}
           hideAlerts={true}
+          nextStepLabel={hasMultipleLocations ? "Next: Location Settings" : "Next: Alert Settings"}
           monitorType={type as MonitorType}
           title={`${typeLabel} Monitor`}
           description="Configure a new uptime monitor"

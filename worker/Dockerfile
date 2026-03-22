@@ -14,9 +14,9 @@ RUN go install go.k6.io/xk6/cmd/xk6@v1.2.3
 RUN xk6 build --with github.com/grafana/xk6-dashboard@v0.8.0
 RUN chmod +x k6
 
-# Get Docker CLI - pin to specific version for reproducible builds
-FROM docker:27.4.1-cli AS docker-cli
-
+# NOTE: Docker CLI removed — execution is orchestrated through Kubernetes Jobs.
+# This image is used both for the long-lived worker control plane and the
+# ephemeral gVisor execution Jobs it creates.
 
 # Build stage with dev dependencies
 FROM base AS builder
@@ -24,7 +24,7 @@ WORKDIR /worker
 COPY package.json package-lock.json* ./
 
 # Install all dependencies for build with caching
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
@@ -48,26 +48,21 @@ COPY --from=k6-builder /go/k6 /usr/local/bin/k6
 RUN chmod +x /usr/local/bin/k6
 ENV K6_BIN_PATH=/usr/local/bin/k6
 
-# Copy Docker CLI
-COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
-RUN chmod +x /usr/local/bin/docker
+# NOTE: Docker CLI removed — execution is orchestrated through Kubernetes Jobs.
 
-# Create app user
-# Note: Playwright image includes 'pwuser' (UID 1000) for secure non-root execution
-# We also create 'nodejs' user for the worker service itself
-# Container execution uses 'pwuser' for security (untrusted user code)
-RUN groupadd --system --gid 1002 nodejs && \
-    useradd --system --uid 1002 --gid nodejs nodejs
+# Use the Playwright image's built-in pwuser (UID 1000) consistently for the
+# worker and child execution processes. This keeps HOME/cache ownership aligned
+# with the non-root runtime enforced by Compose/Kubernetes.
 
 # Copy only necessary files with proper ownership
-COPY --from=builder --chown=nodejs:nodejs /worker/package*.json ./
+COPY --from=builder --chown=pwuser:pwuser /worker/package*.json ./
 
 # Install production dependencies with caching and memory limits
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --legacy-peer-deps --no-audit --no-fund --max-old-space-size=4096
 
-COPY --from=builder --chown=nodejs:nodejs /worker/dist ./dist
-COPY --from=builder --chown=nodejs:nodejs /worker/playwright.config.js ./
+COPY --from=builder --chown=pwuser:pwuser /worker/dist ./dist
+COPY --from=builder --chown=pwuser:pwuser /worker/playwright.config.js ./
 
 # Create directories for test execution with proper permissions
 # Note: Container execution runs as 'pwuser' (UID 1000) from Playwright image
@@ -75,24 +70,25 @@ COPY --from=builder --chown=nodejs:nodejs /worker/playwright.config.js ./
 # Using chmod 777 for /tmp paths since they're ephemeral and pwuser needs write access
 RUN mkdir -p playwright-reports report \
     k6-reports \
-    /home/nodejs/.npm \
-    /home/nodejs/.cache \
     /home/pwuser/.npm \
     /home/pwuser/.cache \
     /root/.npm \
     /tmp/.npm \
+    /tmp/supercheck \
     /tmp/playwright-tests \
     /tmp/playwright-videos \
     /tmp/playwright-reports && \
-    chown -R nodejs:nodejs playwright-reports report k6-reports /worker /home/nodejs && \
-    chown -R pwuser:pwuser /home/pwuser /tmp/playwright-tests /tmp/playwright-videos /tmp/playwright-reports && \
+    chown -R pwuser:pwuser playwright-reports report k6-reports /worker /home/pwuser /tmp/supercheck /tmp/playwright-tests /tmp/playwright-videos /tmp/playwright-reports && \
     chmod -R 755 playwright-reports report k6-reports && \
-    chmod -R 777 /home/nodejs/.npm /home/nodejs/.cache /home/pwuser/.npm /home/pwuser/.cache /root/.npm /tmp/.npm /tmp/playwright-tests /tmp/playwright-videos /tmp/playwright-reports
+    chmod -R 700 /home/pwuser/.npm /home/pwuser/.cache && \
+    chmod -R 755 /tmp/supercheck && \
+    chmod -R 777 /root/.npm /tmp/.npm /tmp/playwright-tests /tmp/playwright-videos /tmp/playwright-reports
 
-# Set node home + npm cache to ensure Playwright/k6 sandboxes can write to npm cache directory
-ENV HOME=/home/nodejs
-ENV npm_config_cache=/home/nodejs/.npm
-ENV NPM_CONFIG_CACHE=/home/nodejs/.npm
+# Set runtime home + npm cache to writable pwuser locations. Compose mounts
+# matching tmpfs paths for these directories in hardened deployments.
+ENV HOME=/home/pwuser
+ENV npm_config_cache=/home/pwuser/.npm
+ENV NPM_CONFIG_CACHE=/home/pwuser/.npm
 
 # Set Playwright browser cache path to standard location - ALREADY SET in base image but good to be explicit if we wanted to override
 # The base image sets PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
@@ -101,6 +97,10 @@ ENV NPM_CONFIG_CACHE=/home/nodejs/.npm
 # Add health check with dynamic port support
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD node -e "const http = require('http'); const port = process.env.PORT || 8000; const req = http.request({hostname: 'localhost', port: port, path: '/health', timeout: 5000}, (res) => process.exit(res.statusCode === 200 ? 0 : 1)); req.on('error', () => process.exit(1)); req.end();"
+
+# GVISOR-006: Run as non-root user by default.
+# pwuser (UID 1000) is from the Playwright base image and has access to browsers.
+USER 1000
 
 # EXPOSE 8000 # disabled per user request
 

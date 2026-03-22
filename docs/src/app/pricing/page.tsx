@@ -22,7 +22,7 @@ const plans = [
             'Community support',
         ],
         cta: 'Deploy Now',
-        ctaLink: '/docs/deployment',
+        ctaLink: '/docs/app/deployment/self-hosted',
         highlighted: false,
     },
     {

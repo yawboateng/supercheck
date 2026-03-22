@@ -1,23 +1,19 @@
 import { NextResponse } from "next/server";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/utils/db";
-import { reports, tests, runs } from "@/db/schema";
+import { tests, runs } from "@/db/schema";
 import { getQueueEventHub, NormalizedQueueEvent } from "@/lib/queue-event-hub";
 import { requireAuthContext } from "@/lib/auth-context";
+import {
+  fetchEventStatusReport,
+  fetchInitialStatusReport,
+  shouldStreamTestStatusEvent,
+} from "./route.helpers";
 
 const encoder = new TextEncoder();
 
 const serialize = (payload: Record<string, unknown>) =>
   `data: ${JSON.stringify(payload)}\n\n`;
-
-async function fetchReport(testId: string) {
-  return db.query.reports.findFirst({
-    where: and(
-      eq(reports.entityType, "test"),
-      eq(reports.entityId, testId)
-    ),
-  });
-}
 
 const terminalStatuses = new Set(["passed", "failed", "error", "completed"]);
 
@@ -123,13 +119,7 @@ export async function GET(request: Request) {
 
       const send = async (event: NormalizedQueueEvent) => {
         if (isClosed) return;
-        if (event.category !== "test") {
-          return;
-        }
-
-        const eventTestId = event.entityId ?? event.queueJobId;
-
-        if (eventTestId !== testId) {
+        if (!shouldStreamTestStatusEvent(event, testId)) {
           return;
         }
 
@@ -143,7 +133,11 @@ export async function GET(request: Request) {
         };
 
         if (terminalStatuses.has(status)) {
-          const report = await fetchReport(testId);
+          const report = await fetchEventStatusReport(
+            testId,
+            projectContext.project.id,
+            event
+          );
           if (report) {
             payload.reportPath = report.reportPath;
             payload.s3Url = report.s3Url;
@@ -159,7 +153,10 @@ export async function GET(request: Request) {
       const unsubscribe = hub.subscribe(send);
       safeEnqueue(encoder.encode(": connected\n\n"));
 
-      const initialReport = await fetchReport(testId);
+      const initialReport = await fetchInitialStatusReport(
+        testId,
+        projectContext.project.id
+      );
       if (initialReport) {
         const initStatus = initialReport.status ?? "running";
         safeEnqueue(

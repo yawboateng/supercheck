@@ -38,46 +38,22 @@ import {
   DEFAULT_QUEUE_ALERTING_CONFIG,
 } from './queue-alerting.types';
 import { executeWithRetry } from '../common/utils/retry.util';
+import { PLAYWRIGHT_QUEUE } from '../execution/constants';
 
 /**
- * All queues in the system that should be monitored.
- *
- * Queue categories:
- * - Execution queues: playwright-global (all Playwright tests/jobs)
- * - K6 queues: k6-global + regional (k6-us-east, k6-eu-central, k6-asia-pacific)
- * - Monitor queues: regional only (monitor-us-east, monitor-eu-central, monitor-asia-pacific)
- * - Scheduler queues: job-scheduler, k6-job-scheduler, monitor-scheduler
- * - Utility queues: email-template-render, data-lifecycle-cleanup
- *
- * CRITICAL: Queue names must match exactly:
- * - App queue definitions in app/src/lib/queue.ts
- * - Worker constants (execution, k6, monitor modules)
- * - KEDA ScaledObjects in deploy/k8s/keda-scaledobject.yaml
+ * Static queues that always exist regardless of enabled locations.
  */
-const MONITORED_QUEUES = [
-  // Playwright execution queue (global - all regions process this)
-  'playwright-global',
-
-  // K6 performance test queues (global + regional)
+const STATIC_MONITORED_QUEUES = [
+  PLAYWRIGHT_QUEUE,
   'k6-global',
-  'k6-us-east',
-  'k6-eu-central',
-  'k6-asia-pacific',
-
-  // Monitor queues (regional only - no global monitor queue in production)
-  'monitor-us-east',
-  'monitor-eu-central',
-  'monitor-asia-pacific',
-
-  // Scheduler queues
   'job-scheduler',
   'k6-job-scheduler',
   'monitor-scheduler',
-
-  // Utility queues
   'email-template-render',
   'data-lifecycle-cleanup',
 ];
+
+const DYNAMIC_QUEUE_PREFIXES = ['k6-', 'monitor-'];
 
 @Injectable()
 export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
@@ -87,6 +63,7 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
   private config: QueueAlertingConfig;
   private state: QueueAlertingState;
   private checkInterval: NodeJS.Timeout | null = null;
+  private healthCheckInProgress = false;
   private readonly metricsHistoryLimit = 60; // Keep 60 samples (1 hour at 1-minute intervals)
 
   constructor(private readonly configService: ConfigService) {
@@ -106,7 +83,7 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.initializeRedis();
-    this.initializeQueues();
+    await this.syncQueues();
     this.startMonitoring();
     this.logger.log(
       `Queue alerting initialized with ${this.queues.size} queues`,
@@ -277,8 +254,29 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
   /**
    * Initialize queue connections
    */
-  private initializeQueues(): void {
-    for (const queueName of MONITORED_QUEUES) {
+  private async syncQueues(): Promise<void> {
+    const monitoredQueues = await this.discoverQueueNames();
+    const nextQueues = new Set(monitoredQueues);
+
+    for (const [queueName, queue] of this.queues) {
+      if (nextQueues.has(queueName)) {
+        continue;
+      }
+
+      await queue.close().catch((error: unknown) => {
+        this.logger.warn(
+          `Failed to close queue ${queueName}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        );
+      });
+      this.queues.delete(queueName);
+      this.state.metricsHistory.delete(queueName);
+    }
+
+    for (const queueName of monitoredQueues) {
+      if (this.queues.has(queueName)) {
+        continue;
+      }
+
       try {
         const queue = new Queue(queueName, {
           connection: this.redisClient.duplicate(),
@@ -292,6 +290,43 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
+  }
+
+  private async discoverQueueNames(): Promise<string[]> {
+    const queueNames = new Set<string>(STATIC_MONITORED_QUEUES);
+    let cursor = '0';
+
+    do {
+      const [nextCursor, keys] = await this.redisClient.scan(
+        cursor,
+        'MATCH',
+        'bull:*:meta',
+        'COUNT',
+        '200',
+      );
+
+      cursor = nextCursor;
+
+      for (const key of keys) {
+        const match = /^bull:(.+):meta$/.exec(key);
+        const queueName = match?.[1];
+
+        if (!queueName || !this.isMonitoredQueueName(queueName)) {
+          continue;
+        }
+
+        queueNames.add(queueName);
+      }
+    } while (cursor !== '0');
+
+    return Array.from(queueNames).sort();
+  }
+
+  private isMonitoredQueueName(queueName: string): boolean {
+    return (
+      STATIC_MONITORED_QUEUES.includes(queueName) ||
+      DYNAMIC_QUEUE_PREFIXES.some((prefix) => queueName.startsWith(prefix))
+    );
   }
 
   /**
@@ -349,23 +384,35 @@ export class QueueAlertingService implements OnModuleInit, OnModuleDestroy {
    * Run health check on all queues
    */
   private async runHealthCheck(): Promise<void> {
-    this.state.lastCheckTimestamp = new Date();
-    const alerts: QueueAlert[] = [];
-
-    for (const [name, queue] of this.queues) {
-      try {
-        const metrics = await this.collectQueueMetrics(name, queue);
-        this.updateMetricsHistory(name, metrics);
-
-        const queueAlerts = this.evaluateThresholds(metrics);
-        alerts.push(...queueAlerts);
-      } catch (error) {
-        this.logger.error(`Error collecting metrics for queue ${name}:`, error);
-      }
+    if (this.healthCheckInProgress) {
+      this.logger.debug('Health check already in progress, skipping this tick');
+      return;
     }
 
-    // Process alerts
-    await this.processAlerts(alerts);
+    this.healthCheckInProgress = true;
+    try {
+      this.state.lastCheckTimestamp = new Date();
+      const alerts: QueueAlert[] = [];
+
+      await this.syncQueues();
+
+      for (const [name, queue] of this.queues) {
+        try {
+          const metrics = await this.collectQueueMetrics(name, queue);
+          this.updateMetricsHistory(name, metrics);
+
+          const queueAlerts = this.evaluateThresholds(metrics);
+          alerts.push(...queueAlerts);
+        } catch (error) {
+          this.logger.error(`Error collecting metrics for queue ${name}:`, error);
+        }
+      }
+
+      // Process alerts
+      await this.processAlerts(alerts);
+    } finally {
+      this.healthCheckInProgress = false;
+    }
   }
 
   /**

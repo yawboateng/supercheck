@@ -4,7 +4,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { Button } from "@/components/ui/button";
 import { TableBadge, type TableBadgeTone } from "@/components/ui/table-badge";
 
-import { Edit3, FolderOpen, Users, Calendar } from "lucide-react";
+import { Edit3, FolderOpen, Users, Calendar, MapPin } from "lucide-react";
 import { toast } from "sonner";
 import { DataTableColumnHeader } from "@/components/tests/data-table-column-header";
 import { UUIDField } from "@/components/ui/uuid-field";
@@ -57,7 +57,8 @@ const formatDate = (dateString: string) => {
 
 export function createProjectColumns(
   onEditProject?: (project: Project) => void,
-  canManageProject?: boolean
+  canManageProject?: boolean,
+  onManageLocations?: (project: Project) => void
 ): ColumnDef<Project>[] {
   return [
     {
@@ -238,11 +239,22 @@ export function createProjectColumns(
         }
 
         return (
-          <div className="flex items-center h-10">
+          <div className="flex items-center h-10 gap-1">
+            {onManageLocations && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 hover:text-emerald-700 dark:text-emerald-400 dark:bg-emerald-500/10 dark:hover:bg-emerald-500/20 dark:hover:text-emerald-300"
+                onClick={() => onManageLocations(project)}
+                title="Location restrictions"
+              >
+                <MapPin className="h-4 w-4" />
+              </Button>
+            )}
             <Button
-              variant="outline"
-              size="sm"
-              className="h-8 w-8 p-0 bg-gray-50 hover:bg-gray-100 text-gray-600 hover:text-gray-700 border-gray-200 hover:border-gray-300 transition-all duration-200 rounded-md shadow-sm"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-blue-600 bg-blue-500/10 hover:bg-blue-500/20 hover:text-blue-700 dark:text-blue-400 dark:bg-blue-500/10 dark:hover:bg-blue-500/20 dark:hover:text-blue-300"
               onClick={() => {
                 if (onEditProject) {
                   onEditProject(project);

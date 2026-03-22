@@ -1,79 +1,51 @@
-import { MONITORING_LOCATIONS } from "@/db/schema";
 import type {
   MonitoringLocation,
   LocationMetadata,
   LocationConfig,
 } from "@/db/schema";
 
-// Re-export key pieces for UI usage
-export { MONITORING_LOCATIONS };
+// Re-export key types for UI usage
 export type { MonitoringLocation, LocationConfig };
 
 /**
- * Location metadata for all available monitoring locations.
- * Includes display names, regions, and geographic coordinates.
+ * Build a metadata lookup from dynamic location data (e.g. from API/hook).
  */
-export const LOCATION_METADATA: Record<MonitoringLocation, LocationMetadata> = {
-  [MONITORING_LOCATIONS.US_EAST]: {
-    code: MONITORING_LOCATIONS.US_EAST,
-    name: "US East",
-    region: "Ashburn",
-    coordinates: { lat: 39.0438, lon: -77.4874 },
-    flag: "🇺🇸",
-  },
-  [MONITORING_LOCATIONS.EU_CENTRAL]: {
-    code: MONITORING_LOCATIONS.EU_CENTRAL,
-    name: "EU Central",
-    region: "Nuremberg",
-    coordinates: { lat: 49.4521, lon: 11.0767 },
-    flag: "🇩🇪",
-  },
-  [MONITORING_LOCATIONS.ASIA_PACIFIC]: {
-    code: MONITORING_LOCATIONS.ASIA_PACIFIC,
-    name: "Asia Pacific",
-    region: "Singapore",
-    coordinates: { lat: 1.3521, lon: 103.8198 },
-    flag: "🇸🇬",
-  },
-};
-
-
-const ALL_MONITORING_LOCATIONS = Object.values(
-  MONITORING_LOCATIONS
-) as MonitoringLocation[];
+export function buildLocationMetadataMap(
+  locations: Array<{
+    code: string;
+    name: string;
+    region: string | null;
+    flag: string | null;
+    coordinates: { lat: number; lon: number } | null;
+  }>
+): Record<string, LocationMetadata> {
+  const map: Record<string, LocationMetadata> = {};
+  for (const loc of locations) {
+    map[loc.code] = {
+      code: loc.code,
+      name: loc.name,
+      region: loc.region || "",
+      coordinates: loc.coordinates ?? undefined,
+      flag: loc.flag ?? undefined,
+    };
+  }
+  return map;
+}
 
 /**
  * Default location configuration for new monitors.
+ * The `locations` array is intentionally empty — the actual location(s) are
+ * resolved at runtime by `resolveDefaultMonitorLocations()`, which respects
+ * the hosting mode (self-hosted = "local" fallback, cloud = first enabled).
+ * Setting `enabled: false` means single-location mode; the array is only
+ * a UI hint and is overwritten when users interact with the location picker.
  */
 export const DEFAULT_LOCATION_CONFIG: LocationConfig = {
   enabled: false,
-  locations: [MONITORING_LOCATIONS.EU_CENTRAL],
+  locations: [],
   threshold: 50, // Majority must be up
   strategy: "majority",
 };
-
-/**
- * Get all available monitoring locations.
- */
-export function getAllLocations(): LocationMetadata[] {
-  return Object.values(LOCATION_METADATA);
-}
-
-/**
- * Get metadata for a specific location.
- */
-export function getLocationMetadata(
-  location: MonitoringLocation
-): LocationMetadata | undefined {
-  return LOCATION_METADATA[location];
-}
-
-/**
- * Get display name for a location.
- */
-export function getLocationDisplayName(location: MonitoringLocation): string {
-  return LOCATION_METADATA[location]?.name || location;
-}
 
 export function isMonitoringLocation(
   value: unknown
@@ -81,73 +53,8 @@ export function isMonitoringLocation(
   if (typeof value !== "string") {
     return false;
   }
-  return ALL_MONITORING_LOCATIONS.includes(value as MonitoringLocation);
-}
-
-/**
- * Validate location configuration.
- */
-export function validateLocationConfig(
-  config: Partial<LocationConfig>
-): { valid: boolean; error?: string } {
-  if (!config) {
-    return { valid: false, error: "Location config is required" };
-  }
-
-  if (config.enabled && (!config.locations || config.locations.length === 0)) {
-    return {
-      valid: false,
-      error: "At least one location must be selected when enabled",
-    };
-  }
-
-  if (config.locations) {
-    for (const location of config.locations) {
-      if (!LOCATION_METADATA[location]) {
-        return { valid: false, error: `Invalid location: ${location}` };
-      }
-    }
-  }
-
-  if (
-    config.threshold !== undefined &&
-    (config.threshold < 0 || config.threshold > 100)
-  ) {
-    return {
-      valid: false,
-      error: "Threshold must be between 0 and 100",
-    };
-  }
-
-  return { valid: true };
-}
-
-/**
- * Normalize legacy uppercase location values to kebab-case
- */
-export function normalizeLegacyLocation(location: string): MonitoringLocation {
-  const upperLocation = location.trim().toUpperCase();
-
-  switch (upperLocation) {
-    case 'US':
-    case 'US_EAST':
-    case 'US-EAST':
-    case 'US EAST':
-      return MONITORING_LOCATIONS.US_EAST;
-    case 'EU':
-    case 'EU_CENTRAL':
-    case 'EU-CENTRAL':
-    case 'EU CENTRAL':
-      return MONITORING_LOCATIONS.EU_CENTRAL;
-    case 'APAC':
-    case 'ASIA_PACIFIC':
-    case 'ASIA-PACIFIC':
-    case 'ASIA PACIFIC':
-      return MONITORING_LOCATIONS.ASIA_PACIFIC;
-    default:
-      // Already in correct format or default to EU Central
-      return location as MonitoringLocation;
-  }
+  // With dynamic locations, any non-empty string is a valid location code
+  return value.length > 0;
 }
 
 /**
@@ -162,15 +69,20 @@ export function calculateAggregatedStatus(
     return "down";
   }
 
-  // Normalize locations to ensure they match the keys in locationStatuses
-  const locations = rawLocations.map((loc) =>
-    normalizeLegacyLocation(loc),
-  );
+  // Use location codes as-is (dynamic locations, no legacy normalization needed)
+  const locations = rawLocations;
 
-  const upCount = locations.filter(
+  // If none of the configured locations exist in the actual results,
+  // fall back to using the result locations directly. This handles
+  // cases where monitor config has stale location codes.
+  const resultKeys = Object.keys(locationStatuses);
+  const hasOverlap = locations.some((loc) => resultKeys.includes(loc));
+  const effectiveLocations = hasOverlap ? locations : resultKeys;
+
+  const upCount = effectiveLocations.filter(
     (loc) => locationStatuses[loc] === true
   ).length;
-  const totalCount = locations.length;
+  const totalCount = effectiveLocations.length;
   const upPercentage = (upCount / totalCount) * 100;
   const threshold =
     typeof config.threshold === "number" ? config.threshold : 50;
@@ -193,22 +105,6 @@ export function calculateAggregatedStatus(
       }
       return anyUp ? "partial" : "down";
   }
-}
-
-/**
- * Get the effective locations for a monitor (handles legacy and multi-location configs).
- */
-export function getEffectiveLocations(
-  config?: LocationConfig | null
-): MonitoringLocation[] {
-  if (!config || !config.enabled) {
-    // Single location mode - use default primary location
-    return [MONITORING_LOCATIONS.EU_CENTRAL];
-  }
-
-  // Normalize legacy locations
-  const locations = config.locations || [MONITORING_LOCATIONS.EU_CENTRAL];
-  return locations.map(loc => normalizeLegacyLocation(loc));
 }
 
 /**
