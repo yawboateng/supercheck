@@ -16,12 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 > - The Docker Compose configuration has changed — the worker now mounts a Kubernetes kubeconfig instead of the Docker socket
 > - Existing tests and monitors continue to work without modification
 >
-> Please refer to the updated [self-hosted deployment guide](deploy/docker/README.md) for step-by-step upgrade instructions.
+> Please refer to the updated [self-hosted deployment guide](https://supercheck.io/docs/app/deployment/self-hosted) for step-by-step upgrade instructions.
 
 ### Added
 - **Sandboxed execution with gVisor** — Test and monitor execution now runs inside gVisor-sandboxed Kubernetes pods, providing kernel-level isolation for all user-submitted scripts ([#276](https://github.com/supercheck-io/supercheck/issues/276))
 - **Dynamic locations system** — Locations are now database-managed instead of hardcoded constants. Super Admins can add, edit, and enable/disable locations from the admin dashboard. Workers dynamically discover regional queues. Per-project location restrictions are available ([#248](https://github.com/supercheck-io/supercheck/issues/248), [#249](https://github.com/supercheck-io/supercheck/issues/249), [#250](https://github.com/supercheck-io/supercheck/issues/250))
-- **Multi-location deployment support** — Deploy workers across geographic regions using the new `docker-compose-worker.yml` template for distributed test execution
 
 ### Changed
 - **Execution model migration** — Replaced Docker socket-based container execution with Kubernetes Jobs running under gVisor. Workers now use a scoped kubeconfig instead of mounting the Docker socket
@@ -30,9 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - Improved deployment documentation with detailed infrastructure requirements and setup guides
 
 ### Fixed
-- Improved monitor execution reliability — fixed race conditions in distributed result persistence, scheduler failure tracking, and alert evaluation during queue outages
 - Improved dynamic worker stability — fixed queue discovery retry loops, heartbeat timing windows, stale queue cleanup, and graceful degradation when Redis is unavailable
-- Fixed Kubernetes execution edge cases including log stream deduplication, cancellation status tracking, and exit code polling
 - Fixed multi-recipient alert email delivery for comma-separated email channels by sending messages sequentially over SMTP and reporting partial delivery failures accurately ([#269](https://github.com/supercheck-io/supercheck/issues/269))
 
 ### Security
