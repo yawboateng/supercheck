@@ -2,7 +2,7 @@
 # Matches docker-compose-worker.yml
 #
 # Usage:
-#   helm install supercheck-worker ./deploy/kubernetes/supercheck -f values-worker.yaml
+#   helm install supercheck-worker ./deploy/helm/supercheck -f values-worker.yaml
 #
 # Deploy on a separate cluster/node in a different geographic region
 # for multi-location monitoring and performance testing.

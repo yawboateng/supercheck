@@ -2,7 +2,7 @@
 # Matches docker-compose-external.yml
 #
 # Usage:
-#   helm install supercheck ./deploy/kubernetes/supercheck -f values-external.yaml
+#   helm install supercheck ./deploy/helm/supercheck -f values-external.yaml
 #
 # This disables Postgres, Redis, and MinIO pods.
 # Configure connection strings for your external managed services.

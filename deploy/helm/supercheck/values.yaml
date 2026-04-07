@@ -2,7 +2,7 @@
 # Matches docker-compose.yml (development with all services)
 #
 # Usage:
-#   helm install supercheck ./deploy/kubernetes/supercheck
+#   helm install supercheck ./deploy/helm/supercheck
 #
 # For production:  helm install supercheck . -f values-production.yaml
 # For external:    helm install supercheck . -f values-external.yaml

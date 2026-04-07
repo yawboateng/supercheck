@@ -18,19 +18,19 @@ Supports three ingress providers: **Istio**, **Traefik**, and **Kubernetes Ingre
 
 ```bash
 # Default (dev/testing — all services, no ingress)
-helm install supercheck ./deploy/kubernetes/supercheck
+helm install supercheck ./deploy/helm/supercheck
 
 # Production (all services + ingress + TLS)
-helm install supercheck ./deploy/kubernetes/supercheck \
-  -f deploy/kubernetes/supercheck/values-production.yaml
+helm install supercheck ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-production.yaml
 
 # External managed databases (no Postgres/Redis/MinIO pods)
-helm install supercheck ./deploy/kubernetes/supercheck \
-  -f deploy/kubernetes/supercheck/values-external.yaml
+helm install supercheck ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-external.yaml
 
 # Remote worker only (connects to main instance)
-helm install supercheck-worker ./deploy/kubernetes/supercheck \
-  -f deploy/kubernetes/supercheck/values-worker.yaml
+helm install supercheck-worker ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-worker.yaml
 ```
 
 ## Deployment Models
@@ -205,7 +205,7 @@ config:
 Then install:
 
 ```bash
-helm install supercheck ./deploy/kubernetes/supercheck -f my-values.yaml
+helm install supercheck ./deploy/helm/supercheck -f my-values.yaml
 ```
 
 ### Key Parameters
@@ -331,7 +331,7 @@ helm install supercheck ./deploy/kubernetes/supercheck -f my-values.yaml
 ### App replicas
 
 ```bash
-helm upgrade supercheck ./deploy/kubernetes/supercheck --set app.replicas=3
+helm upgrade supercheck ./deploy/helm/supercheck --set app.replicas=3
 ```
 
 ### Worker replicas
@@ -339,7 +339,7 @@ helm upgrade supercheck ./deploy/kubernetes/supercheck --set app.replicas=3
 Keep `config.capacity.running` equal to total worker replicas:
 
 ```bash
-helm upgrade supercheck ./deploy/kubernetes/supercheck \
+helm upgrade supercheck ./deploy/helm/supercheck \
   --set worker.replicas=4 \
   --set config.capacity.running=4
 ```
@@ -349,7 +349,7 @@ helm upgrade supercheck ./deploy/kubernetes/supercheck \
 Deploy remote workers on separate clusters pointing to your main instance:
 
 ```bash
-helm install supercheck-worker-eu ./deploy/kubernetes/supercheck \
+helm install supercheck-worker-eu ./deploy/helm/supercheck \
   -f values-worker.yaml \
   --set config.workerLocation=eu-central \
   --set config.database.url="postgresql://user:pass@main-db:5432/supercheck" \
@@ -432,11 +432,11 @@ ingress:
 
 ```bash
 # Update to a new Supercheck version
-helm upgrade supercheck ./deploy/kubernetes/supercheck \
+helm upgrade supercheck ./deploy/helm/supercheck \
   --set supercheckVersion=1.4.0
 
 # Or update your values file and re-apply
-helm upgrade supercheck ./deploy/kubernetes/supercheck \
+helm upgrade supercheck ./deploy/helm/supercheck \
   -f values-production.yaml
 ```
 

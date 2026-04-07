@@ -28,11 +28,37 @@ KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up 
 
 See [docker/README.md](docker/README.md) for detailed configuration options.
 
+## Kubernetes (Helm)
+
+For deployment on Kubernetes with Helm:
+
+```bash
+# Default (dev/testing — all services, no ingress)
+helm install supercheck ./deploy/helm/supercheck
+
+# Production (all services + ingress + TLS)
+helm install supercheck ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-production.yaml
+
+# External managed databases (no Postgres/Redis/MinIO pods)
+helm install supercheck ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-external.yaml
+
+# Remote worker only (connects to main instance)
+helm install supercheck-worker ./deploy/helm/supercheck \
+  -f deploy/helm/supercheck/values-worker.yaml
+```
+
+Supports four deployment models matching the Docker Compose variants — including external managed databases and remote worker-only deployments.
+
+See [helm/supercheck/README.md](helm/supercheck/README.md) for full configuration.
+
 ## Platform Guides
 
 | Platform | Guide |
 |----------|-------|
 | **Coolify** | [Deploy on Coolify](coolify/README.md) |
+| **Kubernetes** | [Helm Chart](helm/supercheck/README.md) |
 
 ## Documentation
 

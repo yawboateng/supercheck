@@ -2,7 +2,7 @@
 # Matches docker-compose-secure.yml
 #
 # Usage:
-#   helm install supercheck ./deploy/kubernetes/supercheck -f values-production.yaml
+#   helm install supercheck ./deploy/helm/supercheck -f values-production.yaml
 #
 # This file defaults to Istio. To switch providers, change ingress.provider below.
 #
