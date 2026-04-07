@@ -26,6 +26,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.worker.serviceAccount.create }}
+      serviceAccountName: {{ .Values.worker.serviceAccount.name }}
+      {{- end }}
       {{- if .Values.app.enabled }}
       initContainers:
         - name: wait-for-app
@@ -66,10 +69,6 @@ spec:
           securityContext:
             {{- toYaml .Values.worker.securityContext | nindent 12 }}
           volumeMounts:
-            {{- if .Values.worker.mountDockerSocket }}
-            - name: docker-socket
-              mountPath: /var/run/docker.sock
-            {{- end }}
             - name: playwright-reports
               mountPath: /worker/playwright-reports
             - name: k6-reports
@@ -77,12 +76,6 @@ spec:
             - name: worker-reports
               mountPath: /worker/report
       volumes:
-        {{- if .Values.worker.mountDockerSocket }}
-        - name: docker-socket
-          hostPath:
-            path: /var/run/docker.sock
-            type: Socket
-        {{- end }}
         - name: playwright-reports
           emptyDir: {}
         - name: k6-reports

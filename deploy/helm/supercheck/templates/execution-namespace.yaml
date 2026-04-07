@@ -1,0 +1,87 @@
+{{- if and .Values.worker.enabled .Values.execution.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ .Values.execution.namespace }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: execution-limits
+  namespace: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ .Values.execution.resourceQuota.requestsCpu | quote }}
+    requests.memory: {{ .Values.execution.resourceQuota.requestsMemory | quote }}
+    limits.cpu: {{ .Values.execution.resourceQuota.limitsCpu | quote }}
+    limits.memory: {{ .Values.execution.resourceQuota.limitsMemory | quote }}
+    count/jobs.batch: {{ .Values.execution.resourceQuota.maxJobs | quote }}
+    pods: {{ .Values.execution.resourceQuota.maxPods | quote }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: execution-guardrails
+  namespace: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      min:
+        cpu: {{ .Values.execution.limitRange.minCpu | quote }}
+        memory: {{ .Values.execution.limitRange.minMemory | quote }}
+      defaultRequest:
+        cpu: {{ .Values.execution.limitRange.defaultRequestCpu | quote }}
+        memory: {{ .Values.execution.limitRange.defaultRequestMemory | quote }}
+      default:
+        cpu: {{ .Values.execution.limitRange.defaultLimitCpu | quote }}
+        memory: {{ .Values.execution.limitRange.defaultLimitMemory | quote }}
+      max:
+        cpu: {{ .Values.execution.limitRange.maxCpu | quote }}
+        memory: {{ .Values.execution.limitRange.maxMemory | quote }}
+{{- if .Values.execution.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: execution-egress
+  namespace: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # Allow DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow external egress, block internal cluster + cloud metadata
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+              - 100.100.100.200/32
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+{{- end }}
+{{- end }}

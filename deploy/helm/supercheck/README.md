@@ -48,15 +48,15 @@ This chart maps directly to the four Docker Compose deployment files:
 
 ```
               ┌──────────────────────────────────┐
-              │         Ingress Provider          │
-              │  (Istio / Traefik / nginx / ...)  │
+              │         Ingress Provider         │
+              │  (Istio / Traefik / nginx / ...) │
               └───────────────┬──────────────────┘
                               │
                app.domain.com │ *.domain.com (status pages)
                               │
                      ┌────────▼─────────┐
-                     │    App (Next.js)  │
-                     │   replicas: 1-N   │
+                     │    App (Next.js) │
+                     │   replicas: 1-N  │
                      └────────┬─────────┘
                               │
                ┌──────────────┼──────────────┐
@@ -67,11 +67,30 @@ This chart maps directly to the four Docker Compose deployment files:
       └────────────┘  └──────────┘  └──────────────┘
                               │
                      ┌────────▼─────────┐
-                     │   Worker (NestJS) │
-                     │   replicas: 1-N   │
-                     │   + Docker socket │
-                     └──────────────────┘
+                     │   Worker (NestJS)│
+                     │   replicas: 1-N  │
+                     └────────┬─────────┘
+                              │ K8s API (creates Jobs)
+                              │
+              ┌───────────────▼───────────────┐
+              │   supercheck-execution (ns)   │
+              │  ┌─────┐ ┌─────┐ ┌─────┐      │
+              │  │ Job │ │ Job │ │ Job │ ...  │
+              │  └─────┘ └─────┘ └─────┘      │
+              │  ResourceQuota + NetworkPolicy│
+              │  RuntimeClass: gvisor (opt.)  │
+              └───────────────────────────────┘
 ```
+
+### Test Execution Model
+
+The worker does **not** use Docker socket. Instead, it creates **ephemeral Kubernetes Jobs**
+in the `supercheck-execution` namespace via the Kubernetes API. This means:
+
+- Works natively on any Kubernetes cluster (EKS, GKE, AKS, K3s, etc.)
+- No Docker daemon required on nodes
+- Test pods are fully isolated with ResourceQuota, LimitRange, and NetworkPolicy
+- Optional gVisor RuntimeClass for kernel-level sandbox isolation
 
 ## Ingress Providers
 
@@ -239,9 +258,25 @@ helm install supercheck ./deploy/helm/supercheck -f my-values.yaml
 |---|---|---|
 | `worker.replicas` | Number of worker replicas | `1` |
 | `worker.image.repository` | Worker image repository | `ghcr.io/supercheck-io/supercheck/worker` |
-| `worker.mountDockerSocket` | Mount host Docker socket | `true` |
+| `worker.serviceAccount.create` | Create ServiceAccount with RBAC | `true` |
+| `worker.serviceAccount.name` | ServiceAccount name | `supercheck-worker` |
 | `worker.resources.limits.cpu` | CPU limit | `1.8` |
 | `worker.resources.limits.memory` | Memory limit | `3Gi` |
+
+#### Execution Sandbox
+
+| Parameter | Description | Default |
+|---|---|---|
+| `execution.namespace` | Namespace for test execution Jobs | `supercheck-execution` |
+| `execution.createNamespace` | Create the namespace + security resources | `true` |
+| `execution.runtimeClassName` | RuntimeClass for execution pods (`gvisor`, `runc`, `""`) | `gvisor` |
+| `execution.nodeSelector` | Node selector for execution pods (key=value) | `""` |
+| `execution.tolerationsJson` | Tolerations for execution pods (JSON) | `""` |
+| `execution.dnsNameservers` | Custom DNS nameservers (comma-separated IPs) | `""` |
+| `execution.networkPolicy.enabled` | Create NetworkPolicy for execution namespace | `true` |
+| `execution.resourceQuota.maxJobs` | Max concurrent execution Jobs | `10` |
+| `execution.resourceQuota.maxPods` | Max concurrent execution Pods | `10` |
+| `execution.resourceQuota.limitsMemory` | Memory limit for all execution pods | `16Gi` |
 
 #### Ingress — Common
 
@@ -453,10 +488,36 @@ helm uninstall supercheck
 > kubectl delete pvc -l app.kubernetes.io/part-of=supercheck
 > ```
 
+## gVisor Setup (Optional)
+
+For kernel-level sandbox isolation, install gVisor on your cluster nodes and create a
+RuntimeClass:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+overhead:
+  podFixed:
+    memory: "150Mi"
+scheduling:
+  nodeSelector:
+    gvisor.io/enabled: "true"
+```
+
+If gVisor is not available, set `execution.runtimeClassName` to `""` or `runc`:
+
+```bash
+helm install supercheck ./deploy/helm/supercheck \
+  --set execution.runtimeClassName=""
+```
+
 ## Notes
 
-- The **worker requires Docker socket access** (`/var/run/docker.sock`) to spawn isolated
-  test execution containers. Ensure your cluster nodes allow this.
+- The **worker uses the Kubernetes API** (not Docker socket) to create ephemeral Jobs in
+  the `supercheck-execution` namespace. A ServiceAccount with RBAC is created automatically.
 - **PostgreSQL, Redis, and MinIO** use StatefulSets with PersistentVolumeClaims. Take
   regular backups of PostgreSQL data.
 - Config and secret changes trigger **automatic pod restarts** via checksum annotations.
@@ -464,3 +525,6 @@ helm uninstall supercheck
   Redis providers (Upstash, Redis Cloud, ElastiCache).
 - Only one ingress provider is active at a time — templates for other providers are not
   rendered.
+- The execution namespace includes **ResourceQuota**, **LimitRange**, and **NetworkPolicy**
+  to constrain test pods. The NetworkPolicy blocks access to internal cluster IPs and
+  cloud metadata endpoints while allowing external egress.

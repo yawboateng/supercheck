@@ -1,0 +1,47 @@
+{{- if and .Values.worker.enabled .Values.worker.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.worker.serviceAccount.name }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+    {{- include "supercheck.worker.selectorLabels" . | nindent 4 }}
+---
+# Role granting the worker permission to manage Jobs and Pods in the execution namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "supercheck.fullname" . }}-execution-manager
+  namespace: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "supercheck.fullname" . }}-execution-manager
+  namespace: {{ .Values.execution.namespace }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.worker.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "supercheck.fullname" . }}-execution-manager
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

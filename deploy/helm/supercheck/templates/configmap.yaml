@@ -62,6 +62,19 @@ data:
   WORKER_LOCATION: {{ .Values.config.workerLocation | quote }}
   WORKER_IMAGE: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Values.supercheckVersion }}"
 
+  # Execution sandbox
+  EXECUTION_NAMESPACE: {{ .Values.execution.namespace | quote }}
+  EXECUTION_RUNTIME_CLASS_NAME: {{ .Values.execution.runtimeClassName | quote }}
+  {{- if .Values.execution.nodeSelector }}
+  EXECUTION_NODE_SELECTOR: {{ .Values.execution.nodeSelector | quote }}
+  {{- end }}
+  {{- if .Values.execution.tolerationsJson }}
+  EXECUTION_TOLERATIONS_JSON: {{ .Values.execution.tolerationsJson | quote }}
+  {{- end }}
+  {{- if .Values.execution.dnsNameservers }}
+  EXECUTION_DNS_NAMESERVERS: {{ .Values.execution.dnsNameservers | quote }}
+  {{- end }}
+
   # Playwright
   PLAYWRIGHT_WORKERS: {{ .Values.config.playwright.workers | quote }}
   PLAYWRIGHT_RETRIES: {{ .Values.config.playwright.retries | quote }}

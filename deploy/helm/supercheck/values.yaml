@@ -64,8 +64,10 @@ worker:
     requests:
       cpu: 500m
       memory: 1Gi
-  # -- Mount host Docker socket for container-based test execution
-  mountDockerSocket: true
+  # -- Create a ServiceAccount with RBAC for creating Jobs in the execution namespace
+  serviceAccount:
+    create: true
+    name: supercheck-worker
   # -- Security context for the worker pod
   securityContext:
     allowPrivilegeEscalation: false
@@ -73,6 +75,50 @@ worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# =============================================================================
+# Execution Sandbox
+# =============================================================================
+# The worker creates ephemeral Kubernetes Jobs for test execution.
+# Jobs run in an isolated namespace with resource quotas and network policies.
+
+execution:
+  # -- Namespace where test execution Jobs are created
+  namespace: supercheck-execution
+  # -- Create the execution namespace and its security resources
+  createNamespace: true
+  # -- Kubernetes RuntimeClass for execution pods (e.g., "gvisor" for sandbox isolation)
+  # Set to "" or "runc" if gVisor is not installed on your cluster
+  runtimeClassName: gvisor
+  # -- Node selector for execution pods (key=value pairs)
+  # Example: "tier=execution,pool=sandbox"
+  nodeSelector: ""
+  # -- Tolerations for execution pods (JSON array string)
+  # Example: '[{"key":"dedicated","operator":"Equal","value":"execution","effect":"NoSchedule"}]'
+  tolerationsJson: ""
+  # -- Custom DNS nameservers for execution pods (comma-separated IPs)
+  dnsNameservers: ""
+  # -- ResourceQuota for the execution namespace
+  resourceQuota:
+    requestsCpu: "4"
+    requestsMemory: "8Gi"
+    limitsCpu: "8"
+    limitsMemory: "16Gi"
+    maxJobs: "10"
+    maxPods: "10"
+  # -- LimitRange defaults for execution containers
+  limitRange:
+    minCpu: "100m"
+    minMemory: "128Mi"
+    defaultRequestCpu: "250m"
+    defaultRequestMemory: "768Mi"
+    defaultLimitCpu: "1500m"
+    defaultLimitMemory: "2Gi"
+    maxCpu: "4"
+    maxMemory: "9Gi"
+  # -- NetworkPolicy: allow DNS + external egress, block internal cluster access
+  networkPolicy:
+    enabled: true
 
 postgres:
   enabled: true
