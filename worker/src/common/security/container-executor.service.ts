@@ -1,112 +1,114 @@
 /**
- * Container-Based Secure Script Execution Service
+ * Secure Script Execution Service
  *
- * Implements sandboxed execution of user-supplied scripts using Docker containers
- * with strict resource limits and security boundaries.
+ * Production execution backend:
  *
- * Security Features:
- * - Isolated execution environment
- * - Resource limits (CPU, memory, disk, network)
- * - Read-only root filesystem
- * - No privilege escalation
- * - Timeout enforcement
- * - Clean-up of containers
+ * - `kubernetes`: Used for both cloud and self-hosted Docker/K3s deployments.
+ *   Creates an ephemeral Job in the
+ *   `supercheck-execution` namespace so untrusted code is isolated away from the
+ *   long-lived worker control plane.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { execa } from 'execa';
-import * as path from 'path';
 import * as fs from 'fs/promises';
-import { randomUUID } from 'crypto';
+import * as crypto from 'crypto';
+import * as path from 'path';
+import * as tar from 'tar';
+import type * as k8s from '@kubernetes/client-node';
+import { Readable, Writable } from 'stream';
+import { finished } from 'stream/promises';
 import { CancellationService } from '../services/cancellation.service';
 
 export interface ContainerExecutionOptions {
   /**
-   * Run ID for cancellation tracking
-   * If provided, the executor will poll for cancellation signals and kill the container if cancelled
+   * Run ID for cancellation tracking.
+   * If provided, the executor will poll for cancellation signals.
    */
   runId?: string;
 
   /**
-   * Timeout in milliseconds
+   * Timeout in milliseconds.
    */
   timeoutMs?: number;
 
   /**
-   * Memory limit in megabytes
+   * Memory limit in megabytes (validated but advisory — actual enforcement
+   * is at the container runtime level via Docker/K8s resource limits).
    */
   memoryLimitMb?: number;
 
   /**
-   * CPU limit (fraction of CPU, e.g., 0.5 for 50%)
+   * CPU limit (fraction of CPU, e.g., 0.5 for 50%).
+   * Validated but advisory — actual enforcement is at the container runtime level.
    */
   cpuLimit?: number;
 
   /**
-   * Environment variables to pass to the container
+   * Environment variables to pass to the execution process.
    */
   env?: Record<string, string>;
 
   /**
-   * Working directory inside the container
+   * Working directory for the child process.
    */
   workingDir?: string;
 
   /**
-   * Docker image to use
+   * Container image (ignored — included for caller compatibility).
    */
   image?: string;
 
   /**
-   * Network mode (none, bridge, host)
+   * Network mode (reserved for future use).
    */
   networkMode?: 'none' | 'bridge' | 'host';
 
   /**
-   * Whether to remove container after execution
+   * Whether to remove container after execution (reserved for future use).
    */
   autoRemove?: boolean;
 
   /**
-   * Path inside container to extract before destroying container
-   * If specified, files will be copied to extractToHost path
+   * Path to extract after execution (same local filesystem).
    */
   extractFromContainer?: string;
 
   /**
-   * Host path where extracted files should be placed
-   * Required if extractFromContainer is specified
+   * Host path where extracted files should be placed.
+   * Required if extractFromContainer is specified.
    */
   extractToHost?: string;
 
   /**
-   * Inline script content to write inside container
-   * If provided, script will be written to workingDir/scriptFileName inside container
-   * This enables true container isolation without host filesystem dependencies
+   * Inline script content to write before execution.
    */
   inlineScriptContent?: string;
 
   /**
-   * Filename for inline script (required if inlineScriptContent is provided)
+   * Filename for inline script (required if inlineScriptContent is provided).
    * Example: 'test.spec.ts'
    */
   inlineScriptFileName?: string;
 
   /**
-   * Additional files to write inside container before execution
-   * Key: relative path inside container, Value: file content
+   * Additional files to write before execution.
+   * Key: relative path, Value: file content.
    */
   additionalFiles?: Record<string, string>;
 
   /**
-   * Absolute directories that should be created inside the container prior to execution
-   * Useful for ensuring report/output paths exist
+   * Directories to create before execution.
    */
   ensureDirectories?: string[];
 
   /**
-   * Streaming hooks for stdout/stderr chunks (used for live log streaming)
+   * Streaming hooks for stdout/stderr chunks (used for live log streaming).
    */
   onStdoutChunk?: (chunk: string) => void | Promise<void>;
   onStderrChunk?: (chunk: string) => void | Promise<void>;
@@ -122,52 +124,190 @@ export interface ContainerExecutionResult {
   error?: string;
 }
 
+/** Internal validated resource limits */
+interface ValidatedLimits {
+  valid: boolean;
+  error?: string;
+  memoryLimitMb: number;
+  cpuLimit: number;
+  timeoutMs: number;
+}
+
 @Injectable()
-export class ContainerExecutorService {
+export class ContainerExecutorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ContainerExecutorService.name);
-  // Use custom worker image with Playwright browsers and k6 pre-installed
+  private static readonly WORKSPACE_ROOT = '/tmp/supercheck';
+  private static readonly POST_EXECUTION_GRACE_SECONDS = 300;
+  private static readonly DEFAULT_DNS_OPTIONS: ReadonlyArray<k8s.V1PodDNSConfigOption> =
+    Object.freeze([
+      { name: 'ndots', value: '1' },
+      { name: 'timeout', value: '2' },
+      { name: 'attempts', value: '3' },
+    ]);
+  private static readonly SLOW_POD_STARTUP_WARN_MS = 5_000;
+  private static readonly OUTCOME_POLL_FAST_UNTIL_MS = 15_000;
+  private static readonly OUTCOME_POLL_MEDIUM_UNTIL_MS = 120_000;
+  private static readonly OUTCOME_POLL_FAST_MS = 1_000;
+  private static readonly OUTCOME_POLL_MEDIUM_MS = 2_000;
+  private static readonly OUTCOME_POLL_SLOW_MS = 5_000;
+  private readonly activeCancellationIntervals: Set<NodeJS.Timeout> =
+    new Set();
+
+  /** Max combined stdout+stderr size in bytes (10 MB) */
+  private static readonly MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+  /** Max artifact tar archive size in bytes (100 MB) */
+  private static readonly MAX_ARTIFACT_ARCHIVE_BYTES = 100 * 1024 * 1024;
+
+  /**
+   * Memory overhead added to the pod memory limit to account for:
+   * - gVisor Sentry process (~100 MB)
+   * - /dev/shm tmpfs counts against cgroup memory in K8s (unlike Docker --shm-size)
+   *
+   * In Docker, --memory and --shm-size are independent limits.
+   * In Kubernetes, emptyDir with medium: Memory counts against the container's
+   * cgroup memory limit.  Without this headroom, tests that used close to the
+   * Docker memory ceiling will OOM under K8s/gVisor.
+   */
+  private static readonly SHM_SIZE_MB = 512;
+  private static readonly GVISOR_SENTRY_OVERHEAD_MB = 150;
+  private static readonly TOTAL_MEMORY_OVERHEAD_MB =
+    ContainerExecutorService.SHM_SIZE_MB +
+    ContainerExecutorService.GVISOR_SENTRY_OVERHEAD_MB;
+
+  /** Allowed filename pattern: alphanumeric, dots, hyphens, underscores */
+  private static readonly SAFE_FILENAME_RE = /^[\w.\-]+$/;
   private readonly defaultImage: string;
-
-  // Seccomp profile path for Chromium sandbox security
-  // This enables running Chromium with sandbox as non-root user
-  private readonly seccompProfilePath: string;
-
-  // Track running containers for cancellation
-  private runningContainers: Map<string, string> = new Map(); // runId -> containerName
+  private readonly executionNamespace: string;
+  private readonly executionRuntimeClassName: string;
+  private readonly executionNodeSelector?: Record<string, string>;
+  private readonly executionTolerations?: k8s.V1Toleration[];
+  private readonly executionDnsNameservers?: string[];
+  private k8sModule: typeof import('@kubernetes/client-node') | null = null;
+  private kubeConfig: k8s.KubeConfig | null = null;
+  private batchApi: k8s.BatchV1Api | null = null;
+  private coreApi: k8s.CoreV1Api | null = null;
+  private logClient: k8s.Log | null = null;
+  private execClient: k8s.Exec | null = null;
+  private readonly runningJobs: Map<string, string> = new Map();
+  /** Track pods that have already logged an exec failure at warn level to avoid log spam. */
+  private readonly execFailureLogged: Set<string> = new Set();
 
   constructor(
     private configService: ConfigService,
     private cancellationService: CancellationService,
   ) {
-    // Resolve seccomp profile path relative to this file
-    // In production, this will be in dist/src/common/security/
-    // The seccomp_profile.json needs to be copied to dist during build
-    this.seccompProfilePath =
-      process.env.SECCOMP_PROFILE_PATH ||
-      path.resolve(__dirname, 'seccomp_profile.json');
-
     this.defaultImage = this.configService.get<string>(
       'WORKER_IMAGE',
       'ghcr.io/supercheck-io/supercheck/worker:latest',
     );
-
-    this.logger.log(
-      `Container executor initialized with default image: ${this.defaultImage}`,
+    this.executionNamespace = this.configService.get<string>(
+      'EXECUTION_NAMESPACE',
+      'supercheck-execution',
     );
-    this.logger.log(`Seccomp profile path: ${this.seccompProfilePath}`);
+    this.executionRuntimeClassName =
+      this.configService
+        .get<string>('EXECUTION_RUNTIME_CLASS_NAME', 'gvisor')
+        ?.trim() || 'gvisor';
+    this.executionNodeSelector = this.parseExecutionNodeSelector(
+      this.configService.get<string>('EXECUTION_NODE_SELECTOR'),
+    );
+    this.executionTolerations = this.parseExecutionTolerations(
+      this.configService.get<string>('EXECUTION_TOLERATIONS_JSON'),
+    );
+    this.executionDnsNameservers = this.parseExecutionDnsNameservers(
+      this.configService.get<string>('EXECUTION_DNS_NAMESERVERS'),
+    );
+  }
+
+  async onModuleInit(): Promise<void> {
+    await this.ensureKubernetesClients();
+    this.logger.log('Container executor initialized');
+    this.logger.log(`Execution namespace: ${this.executionNamespace}`);
+    this.logger.log(`Default execution image: ${this.defaultImage}`);
+    this.logger.log(
+      `Execution runtimeClassName: ${this.executionRuntimeClassName}`,
+    );
+    if (this.executionNodeSelector) {
+      this.logger.log(
+        `Execution nodeSelector: ${JSON.stringify(this.executionNodeSelector)}`,
+      );
+    }
+    if (this.executionTolerations?.length) {
+      this.logger.log(
+        `Execution tolerations: ${JSON.stringify(this.executionTolerations)}`,
+      );
+    }
+    if (this.executionDnsNameservers?.length) {
+      this.logger.log(
+        `Execution DNS nameservers: ${this.executionDnsNameservers.join(', ')} (dnsPolicy: None, ndots=1, timeout=2, attempts=3)`,
+      );
+    } else {
+      this.logger.log(
+        'Execution DNS policy: ClusterFirst with resolver options ndots=1, timeout=2, attempts=3',
+      );
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    // Clear all cancellation intervals
+    for (const interval of this.activeCancellationIntervals) {
+      clearInterval(interval);
+    }
+    this.activeCancellationIntervals.clear();
+
+    const jobCleanup = Array.from(this.runningJobs.entries()).map(
+      async ([runId, jobName]) => {
+        this.logger.warn(`Deleting orphaned execution job ${jobName} for ${runId}`);
+        await this.deleteExecutionJob(jobName);
+      },
+    );
+    await Promise.allSettled(jobCleanup);
+    this.runningJobs.clear();
+  }
+
+  // =====================================================================
+  //  PUBLIC API
+  // =====================================================================
+
+  /**
+   * Resolves the worker directory. Returns `/worker` if it exists (Docker),
+   * otherwise falls back to `process.cwd()` (local dev).
+   */
+  async resolveWorkerDir(): Promise<string> {
+    try {
+      await fs.access('/worker');
+      return '/worker';
+    } catch {
+      return process.cwd();
+    }
   }
 
   /**
-   * Executes a script in a secure Docker container using inline script content
-   * IMPORTANT: All execution must use inline scripts - no host filesystem dependencies
+   * Resolves the Playwright browsers path. Returns `/ms-playwright` if it
+   * exists (Docker image with pre-installed browsers), otherwise `undefined`
+   * so Playwright falls back to its system default (e.g. ~/Library/Caches/ms-playwright).
+   */
+  async resolveBrowsersPath(): Promise<string | undefined> {
+    try {
+      await fs.access('/ms-playwright');
+      return '/ms-playwright';
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Executes a script as a child process inside the worker container.
+   *
+   * All callers (execution.service.ts, k6-execution.service.ts) pass the
+   * same arguments — gVisor isolation is transparent at the runtime level.
    */
   async executeInContainer(
-    scriptPath: string | null, // DEPRECATED: Only kept for signature compatibility, must be null
+    scriptPath: string | null,
     command: string[],
     options: ContainerExecutionOptions = {},
   ): Promise<ContainerExecutionResult> {
-    const startTime = Date.now();
-
     // Validate that scriptPath is null (legacy mode is not supported)
     if (scriptPath !== null) {
       return {
@@ -208,51 +348,83 @@ export class ContainerExecutorService {
       };
     }
 
-    // Note: We skip command argument validation for inline script mode because:
-    // 1. The command will be wrapped in a controlled shell script we generate
-    // 2. All paths and content are sanitized separately (script content is base64-encoded)
-    // 3. The actual execution happens via 'sh -c <our_script>', not the raw command
-    // 4. Validating would reject valid commands like 'k6 run --out json=/tmp/file.json'
-    //
-    // For non-inline mode (if we ever add it back), validation would be needed.
-
-    // Check if Docker is available
-    const dockerAvailable = await this.checkDockerAvailable();
-    if (!dockerAvailable) {
-      this.logger.error(
-        'Docker is not available. Please ensure Docker is installed, running, and the required image is available.',
-      );
+    // Validate filename safety — reject path traversal and shell metacharacters
+    if (
+      !ContainerExecutorService.SAFE_FILENAME_RE.test(
+        options.inlineScriptFileName,
+      )
+    ) {
       return {
         success: false,
         exitCode: 1,
         stdout: '',
-        stderr:
-          'Docker is not available or the required image could not be pulled. Please ensure Docker is installed and running, and you have access to pull the required image.',
-        duration: Date.now() - startTime,
+        stderr: `Invalid script filename: ${options.inlineScriptFileName}`,
+        duration: 0,
         timedOut: false,
-        error: 'Docker is not available or image pull failed',
+        error: 'Script filename contains invalid characters',
       };
     }
 
-    // Default options
-    const {
-      timeoutMs = 300000, // 5 minutes
-      memoryLimitMb = 512,
-      cpuLimit = 0.5,
-      env = {},
-      workingDir = '/worker',
-      image = this.defaultImage,
-      networkMode = 'none',
-      autoRemove = true,
-      extractFromContainer,
-      extractToHost,
-    } = options;
+    const normalizedOptions: ContainerExecutionOptions = {
+      ...options,
+    };
 
-    // If extraction is requested, disable auto-remove so we can copy files first
-    const shouldAutoRemove = autoRemove && !extractFromContainer;
+    // Validate additionalFiles keys — no path traversal, no absolute paths
+    if (options.additionalFiles) {
+      const sanitizedAdditionalFiles: Record<string, string> = {};
+      for (const [filePath, content] of Object.entries(options.additionalFiles)) {
+        const normalizedFilePath = this.normalizeRelativeWorkspacePath(
+          filePath,
+          'additional file path',
+        );
+        if (!normalizedFilePath.valid) {
+          return {
+            success: false,
+            exitCode: 1,
+            stdout: '',
+            stderr: `Invalid additional file path: ${filePath}`,
+            duration: 0,
+            timedOut: false,
+            error:
+              normalizedFilePath.error ||
+              'Additional file path contains invalid characters',
+          };
+        }
+        sanitizedAdditionalFiles[normalizedFilePath.normalized!] = content;
+      }
+      normalizedOptions.additionalFiles = sanitizedAdditionalFiles;
+    }
+
+    if (options.ensureDirectories) {
+      const sanitizedEnsureDirectories: string[] = [];
+      for (const dirPath of options.ensureDirectories) {
+        const normalizedDirPath = this.normalizeWorkspaceScopedPath(
+          dirPath,
+          'ensure directory path',
+          { allowWorkspaceRoot: true },
+        );
+        if (!normalizedDirPath.valid) {
+          return {
+            success: false,
+            exitCode: 1,
+            stdout: '',
+            stderr: `Invalid ensure directory path: ${dirPath}`,
+            duration: 0,
+            timedOut: false,
+            error:
+              normalizedDirPath.error ||
+              'Ensure directory path contains invalid characters',
+          };
+        }
+        if (!sanitizedEnsureDirectories.includes(normalizedDirPath.normalized!)) {
+          sanitizedEnsureDirectories.push(normalizedDirPath.normalized!);
+        }
+      }
+      normalizedOptions.ensureDirectories = sanitizedEnsureDirectories;
+    }
 
     // Validate extraction options
-    if (extractFromContainer && !extractToHost) {
+    if (options.extractFromContainer && !options.extractToHost) {
       return {
         success: false,
         exitCode: 1,
@@ -265,7 +437,36 @@ export class ContainerExecutorService {
       };
     }
 
-    // Validate resource limits to prevent dangerous or invalid configurations
+    if (options.extractFromContainer) {
+      const normalizedExtractPath = this.normalizeWorkspaceScopedPath(
+        options.extractFromContainer,
+        'extractFromContainer',
+        { allowWorkspaceRoot: true },
+      );
+      if (!normalizedExtractPath.valid) {
+        return {
+          success: false,
+          exitCode: 1,
+          stdout: '',
+          stderr: `Invalid extractFromContainer path: ${options.extractFromContainer}`,
+          duration: 0,
+          timedOut: false,
+          error:
+            normalizedExtractPath.error ||
+            'Invalid extractFromContainer path',
+        };
+      }
+      normalizedOptions.extractFromContainer = normalizedExtractPath.normalized;
+    }
+
+    // Default options
+    const {
+      timeoutMs = 300000,
+      memoryLimitMb = 512,
+      cpuLimit = 0.5,
+    } = options;
+
+    // Validate resource limits
     const validatedLimits = this.validateResourceLimits({
       memoryLimitMb,
       cpuLimit,
@@ -284,572 +485,1403 @@ export class ContainerExecutorService {
       };
     }
 
-    // Use validated limits
-    const validMemoryLimit = validatedLimits.memoryLimitMb;
-    const validCpuLimit = validatedLimits.cpuLimit;
-    const validTimeoutMs = validatedLimits.timeoutMs;
+    return this.executeInKubernetes(command, normalizedOptions, validatedLimits);
+  }
 
-    const containerName = `supercheck-exec-${randomUUID()}`;
+  private async ensureKubernetesClients(): Promise<void> {
+    if (this.kubeConfig && this.batchApi && this.coreApi && this.logClient && this.execClient) {
+      return;
+    }
+
+    const k8sModule =
+      this.k8sModule || (await import('@kubernetes/client-node'));
+    this.k8sModule = k8sModule;
+
+    const kubeConfig = new k8sModule.KubeConfig();
+    kubeConfig.loadFromDefault();
+
+    this.kubeConfig = kubeConfig;
+    this.batchApi = kubeConfig.makeApiClient(k8sModule.BatchV1Api);
+    this.coreApi = kubeConfig.makeApiClient(k8sModule.CoreV1Api);
+    this.logClient = new k8sModule.Log(kubeConfig);
+    this.execClient = new k8sModule.Exec(kubeConfig);
+  }
+
+  private async executeInKubernetes(
+    command: string[],
+    options: ContainerExecutionOptions,
+    limits: ValidatedLimits,
+  ): Promise<ContainerExecutionResult> {
+    const startTime = Date.now();
+    const workspace = this.buildWorkspacePath(options.runId);
+    const shellScript = this.buildShellScript(
+      { ...options, _workspace: workspace },
+      command,
+    );
+    const jobName = this.buildExecutionJobName(options.runId);
+    const workingDir = options.workingDir || '/worker';
+
+    let podName: string | null = null;
+    let logAbort: AbortController | null = null;
+    let cancellationInterval: NodeJS.Timeout | null = null;
+    let killed = false;
+    let timedOut = false;
+    let combinedLogs = '';
+    let podStartupDurationMs = 0;
+    let artifactExtractionDurationMs = 0;
+    const logCollector = this.createLogCollector(options);
 
     try {
-      // Build Docker command with security constraints
-      // Following Playwright Docker best practices: https://playwright.dev/docs/docker
-      // Supports all browsers: Chromium, Firefox, and WebKit (Safari)
-      //
-      // SECURITY: Running as non-root user (pwuser) with seccomp profile
-      // This is REQUIRED because we execute untrusted user-provided code.
-      // - pwuser: Non-root user in Playwright image (UID 1000)
-      // - seccomp profile: Enables Chromium sandbox with user namespace cloning
-      const dockerArgs = [
-        'run',
-        '--name',
-        containerName,
-        // SECURITY: Run as non-root user (pwuser) - CRITICAL for untrusted code
-        // The Playwright Docker image includes 'pwuser' user (UID 1000)
-        // This enables the Chromium sandbox which is disabled when running as root
-        '--user',
-        'pwuser',
-        // SECURITY: Seccomp profile for Chromium sandbox
-        // Allows user namespace syscalls (clone, setns, unshare) needed for sandbox
-        // Based on Docker default profile with additional permissions for Chromium
-        `--security-opt`,
-        `seccomp=${this.seccompProfilePath}`,
-        // Playwright recommended flags:
-        // 1. --init: Use tini as PID 1 to avoid zombie processes (common cause of container issues)
-        //    Works with all browsers (Chromium, Firefox, WebKit)
-        '--init',
-        // 2. --ipc=host: Required for Chromium to prevent memory crashes
-        //    Safe for Firefox and WebKit (no negative impact)
-        '--ipc=host',
-        // Security options
-        // NOTE: --read-only flag removed because container needs to write:
-        // 1. Test scripts to /tmp/ (inline script injection)
-        // 2. Test reports to /tmp/playwright-reports/ or /tmp/ (for docker cp extraction)
-        // Container is still secure via: non-root user, seccomp profile, --cap-drop=ALL,
-        // resource limits, and automatic removal after execution.
-        '--security-opt=no-new-privileges', // Prevent privilege escalation
-        '--cap-drop=ALL', // Drop all Linux capabilities
-        // Resource limits
-        // Memory limits: Set both memory and memory-swap to same value to disable swap
-        // This ensures containers are bounded to actual physical memory only
-        `--memory=${validMemoryLimit}m`,
-        `--memory-swap=${validMemoryLimit}m`, // Equal to --memory disables swap usage
-        `--cpus=${validCpuLimit}`,
-        '--pids-limit=256', // Increased for parallel browser instances (Chromium, Firefox, WebKit)
-        // Out-of-memory behavior
-        '--oom-kill-disable=false', // Kill container if it exceeds memory limit instead of kernel panic
-        // Network
-        `--network=${networkMode}`,
-      ];
+      await this.ensureKubernetesClients();
 
-      // Cleanup (disabled if we need to extract files)
-      if (shouldAutoRemove) {
-        dockerArgs.push('--rm');
+      const job = this.buildExecutionJob({
+        jobName,
+        workspace,
+        shellScript,
+        workingDir,
+        limits,
+        options,
+      });
+
+      await this.batchApi!.createNamespacedJob({
+        namespace: this.executionNamespace,
+        body: job,
+      });
+
+      if (options.runId) {
+        this.runningJobs.set(options.runId, jobName);
+        cancellationInterval = this.startKubernetesCancellationPoller(
+          options.runId,
+          jobName,
+          () => {
+            killed = true;
+          },
+        );
       }
 
-      // Working directory
-      dockerArgs.push('-w', workingDir);
-
-      // Container-only execution: Only mount node_modules (read-only)
-      // Test scripts will be created inside container via shell commands
-      // NOTE: Do NOT bind-mount /worker/node_modules or config files here.
-      // In containerized deployments (Dokploy/Kubernetes/Docker Compose) the worker
-      // runs inside a container and the Docker daemon on the host cannot access the
-      // worker's filesystem paths. Binding a non-existent host path would mask the
-      // baked-in node_modules inside the execution image, forcing npm to try fetching
-      // Playwright at runtime and fail with EACCES. We rely on the dependencies
-      // already baked into the worker image instead.
-
-      // NOTE: Do NOT use --tmpfs for /tmp because tmpfs is destroyed when container exits,
-      // preventing docker cp extraction. Use regular container filesystem instead - it's
-      // still isolated and cleaned up when container is removed.
-
-      // Allocate shared memory for browser processes (all browsers benefit from this)
-      // - Chromium: Heavy shm usage for rendering and IPC
-      // - Firefox: Moderate shm usage for content processes
-      // - WebKit: Lower shm usage but still benefits from larger allocation
-      // 512MB is sufficient for 2 parallel browser instances in Medium instances
-      dockerArgs.push('--shm-size=512m');
-
-      // Add environment variables
-      for (const [key, value] of Object.entries(env)) {
-        // Validate env var names (allow alphanumeric and underscore, must start with letter or underscore)
-        // This allows npm_* and other common environment variables
-        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
-          this.logger.warn(`Invalid environment variable name: ${key}`);
-          continue;
-        }
-        dockerArgs.push('-e', `${key}=${value}`);
+      const podWaitStartedAt = Date.now();
+      podName = await this.waitForExecutionPod(jobName);
+      podStartupDurationMs = Date.now() - podWaitStartedAt;
+      if (
+        podStartupDurationMs >
+        ContainerExecutorService.SLOW_POD_STARTUP_WARN_MS
+      ) {
+        this.logger.warn(
+          `[${jobName}] Execution pod ${podName} became visible after ${podStartupDurationMs}ms. Slow startup usually indicates image pull, scheduling pressure, or cluster DNS/network latency.`,
+        );
+      } else {
+        this.logger.debug(
+          `[${jobName}] Execution pod ${podName} became visible after ${podStartupDurationMs}ms`,
+        );
       }
 
-      // Ensure we have a POSIX shell entrypoint so shell script execution is consistent across images (e.g., grafana/k6)
-      dockerArgs.push('--entrypoint', '/bin/sh');
-
-      // Add image
-      dockerArgs.push(image);
-
-      // Container-only execution: Wrap command in shell script that:
-      // 1. Creates test file(s) from inline content
-      // 2. Executes the original command
-      // Using base64 encoding to safely pass script content
-
-      const scriptContent = Buffer.from(options.inlineScriptContent).toString(
-        'base64',
-      );
-      const scriptPath = `/tmp/${options.inlineScriptFileName}`;
-
-      // Build shell wrapper commands as an array, then join
-      const shellCommands: string[] = [];
-
-      // Ensure required directories exist before writing files or executing commands
-      if (options.ensureDirectories && options.ensureDirectories.length > 0) {
-        const uniqueDirs = Array.from(new Set(options.ensureDirectories));
-        for (const dir of uniqueDirs) {
-          if (!dir || typeof dir !== 'string') {
-            continue;
-          }
-          const escapedDir = dir.replace(/'/g, "'\\''");
-          shellCommands.push(`mkdir -p '${escapedDir}'`);
-        }
-      }
-
-      // Ensure specs can resolve dependencies by linking /tmp/node_modules -> /worker/node_modules
-      shellCommands.push(
-        '[ -d /worker/node_modules ] && [ ! -e /tmp/node_modules ] && ln -s /worker/node_modules /tmp/node_modules || true',
+      logAbort = this.startLogStreamWithReconnect(
+        podName,
+        logCollector.stream,
+        jobName,
       );
 
-      // Write main script file (using printf for better compatibility)
-      shellCommands.push(
-        `printf '%s' "${scriptContent}" | base64 -d > ${scriptPath}`,
+      const outcome = await this.waitForExecutionOutcome(
+        podName,
+        workspace,
+        limits.timeoutMs,
       );
-      shellCommands.push(`chmod +x ${scriptPath}`);
+      timedOut = outcome.timedOut;
+      killed = killed || outcome.cancelled;
 
-      // Write additional files if provided
-      if (options.additionalFiles) {
-        for (const [filePath, content] of Object.entries(
-          options.additionalFiles,
-        )) {
-          const encodedContent = Buffer.from(content).toString('base64');
-          const targetPath = filePath.startsWith('/')
-            ? filePath
-            : `/tmp/${filePath}`;
-          shellCommands.push(
-            `printf '%s' "${encodedContent}" | base64 -d > ${targetPath}`,
+      if (options.extractFromContainer && options.extractToHost && !timedOut && !killed) {
+        const extractSource = this.rewriteTmpPath(options.extractFromContainer, workspace);
+        const extractionStartedAt = Date.now();
+        try {
+          await this.extractPodArtifacts(podName, extractSource, options.extractToHost, workspace);
+          artifactExtractionDurationMs = Date.now() - extractionStartedAt;
+          this.logger.debug(
+            `[${jobName}] Extracted artifacts from ${podName} in ${artifactExtractionDurationMs}ms`,
+          );
+        } catch (extractError) {
+          artifactExtractionDurationMs = Date.now() - extractionStartedAt;
+          this.logger.error(
+            `Failed to extract pod artifacts after ${artifactExtractionDurationMs}ms: ${
+              extractError instanceof Error ? extractError.message : String(extractError)
+            }`,
           );
         }
       }
 
-      // Execute the original command
-      // Replace any reference to the script path with the container path
-      const adjustedCommand = command.map((arg) =>
-        arg === options.inlineScriptFileName ? scriptPath : arg,
-      );
-
-      // Build the exec command with proper quoting for args that might have special chars
-      const quotedCommand = adjustedCommand
-        .map((arg) => {
-          // If arg contains spaces or special characters, quote it
-          if (/[\s|&;<>()$`"'\\]/.test(arg)) {
-            // Escape single quotes in the arg, then wrap in single quotes
-            return `'${arg.replace(/'/g, "'\\''")}'`;
-          }
-          return arg;
-        })
-        .join(' ');
-
-      shellCommands.push(quotedCommand);
-
-      // Join main commands with && (each must succeed)
-      const mainScript = shellCommands.join(' && ');
-
-      // Use main script directly
-      const shellScript = mainScript;
-
-      this.logger.debug(
-        `[Container-Only] Generated shell wrapper for inline script execution`,
-      );
-      this.logger.debug(
-        `[Container-Only] Shell script: ${shellScript.substring(0, 1000)}`,
-      );
-
-      // Execute via shell
-      dockerArgs.push('-c', shellScript);
-
-      // Use validated timeout (validation already ensures it's a valid positive number)
-      const timeout = validTimeoutMs > 0 ? validTimeoutMs : undefined;
-
-      this.logger.log(
-        `Executing in container: ${containerName} with timeout ${timeout || 'none'}ms, memory limit ${validMemoryLimit}MB (no swap), CPU limit ${validCpuLimit}`,
-      );
-
-      // Execute with timeout
-      const child = execa('docker', dockerArgs, {
-        timeout,
-        reject: false, // Don't throw on non-zero exit
-        all: true, // Combine stdout and stderr
-      });
-
-      // Register container for cancellation tracking
-      if (options.runId) {
-        this.runningContainers.set(options.runId, containerName);
-        this.logger.debug(
-          `Registered container ${containerName} for runId ${options.runId}`,
-        );
-      }
-
-      // Start background cancellation checker
-      let cancellationCheckInterval: NodeJS.Timeout | null = null;
-      let containerKilled = false;
-
-      if (options.runId) {
-        cancellationCheckInterval = setInterval(() => {
-          void (async () => {
-            try {
-              const isCancelled = await this.cancellationService.isCancelled(
-                options.runId!,
-              );
-              if (isCancelled && !containerKilled) {
-                this.logger.warn(
-                  `[${options.runId}] Cancellation detected - killing container ${containerName}`,
-                );
-                containerKilled = true;
-
-                // Kill the container immediately
-                await this.killContainer(containerName);
-
-                // Clear the cancellation signal
-                await this.cancellationService.clearCancellationSignal(
-                  options.runId!,
-                );
-
-                // Kill the child process
-                child.kill('SIGKILL');
-              }
-            } catch (error) {
-              this.logger.error(
-                `Error checking cancellation: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
-          })();
-        }, 1000); // Check every second
-      }
-
-      // Stream chunks if requested
-      if (options.onStdoutChunk && child.stdout) {
-        child.stdout.on('data', (chunk: Buffer) => {
-          try {
-            void options.onStdoutChunk?.(chunk.toString());
-          } catch {
-            /* ignore streaming errors */
-          }
+      if (!timedOut && !killed && podName) {
+        await this.signalExecutionExit(podName, workspace).catch((signalError) => {
+          this.logger.debug(
+            `Failed to signal execution pod exit for ${podName}: ${
+              signalError instanceof Error
+                ? signalError.message
+                : String(signalError)
+            }`,
+          );
         });
       }
 
-      if (options.onStderrChunk && child.stderr) {
-        child.stderr.on('data', (chunk: Buffer) => {
-          try {
-            void options.onStderrChunk?.(chunk.toString());
-          } catch {
-            /* ignore streaming errors */
-          }
-        });
+      if (logAbort) {
+        logAbort.abort();
       }
 
-      const result = await child;
-
-      // Stop cancellation checker
-      if (cancellationCheckInterval) {
-        clearInterval(cancellationCheckInterval);
-      }
-
-      // Unregister container
-      if (options.runId) {
-        this.runningContainers.delete(options.runId);
-        this.logger.debug(`Unregistered container for runId ${options.runId}`);
+      combinedLogs = logCollector.getOutput();
+      const finalLogs = await this.fetchPodLogsSnapshot(podName).catch(
+        () => combinedLogs,
+      );
+      if (finalLogs.length >= combinedLogs.length) {
+        combinedLogs = finalLogs;
       }
 
       const duration = Date.now() - startTime;
-
-      // Check if timed out
-      const timedOut = result.timedOut || false;
-
-      if (timedOut) {
-        this.logger.warn(`Container execution timed out: ${containerName}`);
-        // Don't remove container yet if extraction is requested
-        // Extraction logic will handle cleanup in finally block
-        if (!extractFromContainer && !extractToHost) {
-          // No extraction needed, safe to remove immediately
-          await this.forceRemoveContainer(containerName);
-        }
-      }
-
-      // Log execution result (stdout is saved to console.log, no need to log full content)
-      this.logger.debug(
-        `Container ${containerName} exited with code ${result.exitCode}`,
+      const exitCode = killed
+        ? 137
+        : (outcome.exitCode ?? (timedOut ? 124 : 1));
+      this.logger.log(
+        `[${jobName}] Execution finished exitCode=${exitCode} duration=${duration}ms podStartup=${podStartupDurationMs}ms artifactExtraction=${artifactExtractionDurationMs}ms timedOut=${timedOut} cancelled=${killed}`,
       );
-      if (result.stdout && result.stdout.trim().length > 0) {
-        this.logger.debug(
-          `Container stdout: ${result.stdout.length} chars (saved to console.log)`,
-        );
-      }
-      if (result.stderr && result.stderr.trim().length > 0) {
-        this.logger.debug(
-          `Container stderr: ${result.stderr.length} chars (content suppressed to avoid sensitive data exposure)`,
-        );
-      }
-
-      // Log errors for non-zero exits
-      if (result.exitCode !== 0 && !timedOut) {
-        this.logger.error(
-          `Container ${containerName} failed with exit code ${result.exitCode}`,
-        );
-        if (result.stderr && result.stderr.trim().length > 0) {
-          this.logger.error(
-            `Container stderr captured (${result.stderr.length} chars). Content suppressed; inspect persisted run artifacts for details.`,
-          );
-        }
-      }
-
-      // Extract files from container if requested (before container is destroyed)
-      if (extractFromContainer && extractToHost) {
-        try {
-          this.logger.log(
-            `Extracting ${extractFromContainer} from container ${containerName} to ${extractToHost}`,
-          );
-
-          // Ensure the host directory exists
-          await fs.mkdir(extractToHost, { recursive: true });
-
-          // Use docker cp to extract files from container
-          // Format: docker cp <container>:<src_path>/. <dest_path>
-          // The trailing /. extracts the CONTENTS of the directory, not the directory itself
-          await execa('docker', [
-            'cp',
-            `${containerName}:${extractFromContainer}/.`,
-            extractToHost,
-          ]);
-
-          this.logger.log(`Successfully extracted files to ${extractToHost}`);
-        } catch (extractError) {
-          this.logger.error(
-            `Failed to extract files from container: ${extractError instanceof Error ? extractError.message : String(extractError)}`,
-          );
-          // Continue execution - don't fail the whole operation if extraction fails
-        } finally {
-          // Clean up the container after extraction (or if extraction failed)
-          await this.forceRemoveContainer(containerName);
-        }
-      }
 
       return {
-        success: result.exitCode === 0 && !timedOut,
-        exitCode: result.exitCode || (timedOut ? 124 : 1),
-        stdout: result.stdout || '',
-        stderr: result.stderr || '',
+        success: exitCode === 0 && !timedOut && !killed,
+        exitCode,
+        stdout: combinedLogs,
+        stderr: '',
         duration,
         timedOut,
         error: timedOut
-          ? `Execution timed out after ${timeoutMs}ms`
-          : result.exitCode !== 0
-            ? `Container exited with code ${result.exitCode}`
-            : undefined,
+          ? `Execution timed out after ${limits.timeoutMs}ms`
+          : killed
+            ? 'Execution cancelled (exit code 137)'
+            : exitCode !== 0
+              ? outcome.message || `Process exited with code ${exitCode}`
+              : undefined,
       };
     } catch (error) {
-      const duration = Date.now() - startTime;
-      this.logger.error(
-        `Container execution failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-
-      // Try to clean up the container
-      await this.forceRemoveContainer(containerName);
-
       return {
         success: false,
         exitCode: 1,
-        stdout: '',
+        stdout: logCollector.getOutput(),
         stderr: error instanceof Error ? error.message : String(error),
-        duration,
-        timedOut: false,
+        duration: Date.now() - startTime,
+        timedOut,
         error: error instanceof Error ? error.message : String(error),
       };
+    } finally {
+      if (logAbort) {
+        logAbort.abort();
+      }
+      if (cancellationInterval) {
+        clearInterval(cancellationInterval);
+        this.activeCancellationIntervals.delete(cancellationInterval);
+      }
+      if (options.runId) {
+        this.runningJobs.delete(options.runId);
+      }
+      if (podName) {
+        this.execFailureLogged.delete(podName);
+      }
+      await this.deleteExecutionJob(jobName);
+    }
+  }
+
+  private buildExecutionJob(params: {
+    jobName: string;
+    workspace: string;
+    shellScript: string;
+    workingDir: string;
+    limits: ValidatedLimits;
+    options: ContainerExecutionOptions;
+  }): k8s.V1Job {
+    const { jobName, workspace, shellScript, workingDir, limits, options } = params;
+    const image = options.image || this.defaultImage;
+    const envVars = this.buildKubernetesEnv(options.env, workspace);
+    const dnsSettings = this.buildExecutionPodDnsSettings();
+    const deadlineSeconds = Math.ceil((limits.timeoutMs + 120_000) / 1000);
+    const resourceCpuLimit = `${Math.max(100, Math.round(limits.cpuLimit * 1000))}m`;
+    const resourceCpuRequest = `${Math.max(100, Math.round(limits.cpuLimit * 500))}m`;
+    // Add overhead for /dev/shm tmpfs (counts against cgroup in K8s) and gVisor Sentry
+    const effectiveMemoryMb = limits.memoryLimitMb + ContainerExecutorService.TOTAL_MEMORY_OVERHEAD_MB;
+    const resourceMemoryLimit = `${effectiveMemoryMb}Mi`;
+    const resourceMemoryRequest = `${Math.max(128, Math.round(effectiveMemoryMb * 0.75))}Mi`;
+    const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
+    const exitSignalFile = this.getWorkspaceExitSignalFile(workspace);
+    const wrappedScript = this.buildKubernetesWrapperScript(
+      shellScript,
+      exitCodeFile,
+      exitSignalFile,
+    );
+    const runLabel = this.buildLabelValue(options.runId);
+
+    return {
+      apiVersion: 'batch/v1',
+      kind: 'Job',
+      metadata: {
+        name: jobName,
+        namespace: this.executionNamespace,
+        labels: {
+          'app.kubernetes.io/managed-by': 'supercheck-worker',
+          'app.kubernetes.io/component': 'execution',
+          'supercheck.io/run-id': runLabel,
+        },
+      },
+      spec: {
+        ttlSecondsAfterFinished: 600,
+        backoffLimit: 0,
+        activeDeadlineSeconds: deadlineSeconds,
+        template: {
+          metadata: {
+            labels: {
+              'app.kubernetes.io/managed-by': 'supercheck-worker',
+              'app.kubernetes.io/component': 'execution',
+              'supercheck.io/run-id': runLabel,
+            },
+          },
+          spec: {
+            runtimeClassName: this.executionRuntimeClassName,
+            restartPolicy: 'Never',
+            automountServiceAccountToken: false,
+            enableServiceLinks: false,
+            terminationGracePeriodSeconds: 1,
+            nodeSelector: this.executionNodeSelector,
+            tolerations: this.executionTolerations,
+            ...dnsSettings,
+            securityContext: {
+              runAsNonRoot: true,
+              runAsUser: 1000,
+              runAsGroup: 1000,
+              fsGroup: 1000,
+              seccompProfile: { type: 'RuntimeDefault' },
+            },
+            containers: [
+              {
+                name: 'execution',
+                image,
+                imagePullPolicy: 'IfNotPresent',
+                command: ['/bin/sh', '-c', wrappedScript],
+                workingDir,
+                env: envVars,
+                resources: {
+                  requests: {
+                    cpu: resourceCpuRequest,
+                    memory: resourceMemoryRequest,
+                  },
+                  limits: {
+                    cpu: resourceCpuLimit,
+                    memory: resourceMemoryLimit,
+                  },
+                },
+                securityContext: {
+                  runAsNonRoot: true,
+                  runAsUser: 1000,
+                  allowPrivilegeEscalation: false,
+                  readOnlyRootFilesystem: true,
+                  capabilities: {
+                    drop: ['ALL'],
+                  },
+                  seccompProfile: {
+                    type: 'RuntimeDefault',
+                  },
+                },
+                volumeMounts: [
+                  {
+                    name: 'tmp',
+                    mountPath: '/tmp',
+                  },
+                  {
+                    name: 'dshm',
+                    mountPath: '/dev/shm',
+                  },
+                ],
+              },
+            ],
+            volumes: [
+              {
+                name: 'tmp',
+                emptyDir: {},
+              },
+              {
+                name: 'dshm',
+                emptyDir: {
+                  medium: 'Memory',
+                  sizeLimit: `${ContainerExecutorService.SHM_SIZE_MB}Mi`,
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+  }
+
+  private buildExecutionPodDnsSettings(): Pick<
+    k8s.V1PodSpec,
+    'dnsPolicy' | 'dnsConfig'
+  > {
+    const options = [
+      ...ContainerExecutorService.DEFAULT_DNS_OPTIONS,
+    ];
+
+    if (this.executionDnsNameservers?.length) {
+      return {
+        dnsPolicy: 'None',
+        dnsConfig: {
+          nameservers: this.executionDnsNameservers,
+          searches: [
+            `${this.executionNamespace}.svc.cluster.local`,
+            'svc.cluster.local',
+            'cluster.local',
+          ],
+          options,
+        },
+      };
+    }
+
+    return {
+      dnsPolicy: 'ClusterFirst',
+      dnsConfig: {
+        options,
+      },
+    };
+  }
+
+  private buildKubernetesWrapperScript(
+    shellScript: string,
+    exitCodeFile: string,
+    exitSignalFile: string,
+  ): string {
+    const escapedExitCodeFile = this.escapeShellArg(exitCodeFile);
+    const escapedExitSignalFile = this.escapeShellArg(exitSignalFile);
+    return [
+      `(${shellScript})`,
+      'EXIT_CODE=$?',
+      `printf '%s' "$EXIT_CODE" > ${escapedExitCodeFile}`,
+      "trap 'exit $EXIT_CODE' TERM INT",
+      `DEADLINE=$(( $(date +%s) + ${ContainerExecutorService.POST_EXECUTION_GRACE_SECONDS} ))`,
+      `while [ ! -f ${escapedExitSignalFile} ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do sleep 1; done`,
+      'exit $EXIT_CODE',
+    ].join('; ');
+  }
+
+  private buildKubernetesEnv(
+    env: Record<string, string> | undefined,
+    workspace: string,
+  ): k8s.V1EnvVar[] {
+    const merged = new Map<string, string>([
+      ['HOME', `${workspace}/home`],
+      ['npm_config_cache', `${workspace}/.npm`],
+      ['NPM_CONFIG_CACHE', `${workspace}/.npm`],
+      ['TMPDIR', workspace],
+      ['TEMP', workspace],
+      ['TMP', workspace],
+    ]);
+
+    if (env) {
+      for (const [name, value] of Object.entries(env)) {
+        if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+          merged.set(name, this.rewriteTmpPath(value, workspace));
+        }
+      }
+    }
+
+    return Array.from(merged.entries()).map(([name, value]) => ({
+      name,
+      value,
+    }));
+  }
+
+  private buildExecutionJobName(runId?: string): string {
+    const suffix = crypto
+      .createHash('sha256')
+      .update(runId || crypto.randomUUID())
+      .digest('hex')
+      .slice(0, 20);
+    return `sc-exec-${suffix}`;
+  }
+
+  private buildLabelValue(value?: string): string {
+    const normalized = (value || crypto.randomUUID())
+      .toLowerCase()
+      .replace(/[^a-z0-9.-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!normalized) {
+      return 'unknown';
+    }
+    return normalized.slice(0, 63);
+  }
+
+  private async waitForExecutionPod(jobName: string): Promise<string> {
+    const timeoutAt = Date.now() + 120_000;
+    const labelSelector = `job-name=${jobName}`;
+
+    while (Date.now() < timeoutAt) {
+      const pods = await this.coreApi!.listNamespacedPod({
+        namespace: this.executionNamespace,
+        labelSelector,
+      });
+      const pod = pods.items[0];
+      if (pod?.metadata?.name) {
+        // Return as soon as the pod exists (even in Pending phase).
+        // On cold nodes, image pulls for the 3+ GB worker image can take
+        // minutes — blocking here until Running would cause spurious
+        // "did not appear within 120s" failures.
+        // The log stream's reconnect logic handles 400 errors from the
+        // API server while the container is still starting up.
+        return pod.metadata.name;
+      }
+      await this.sleep(1000);
+    }
+
+    throw new Error(`Execution pod for job ${jobName} did not appear within 120s`);
+  }
+
+  private createLogCollector(options: ContainerExecutionOptions): {
+    stream: Writable & {
+      suppressLiveForwarding: () => void;
+      resumeLiveForwarding: () => void;
+    };
+    getOutput: () => string;
+    suppressLiveForwarding: () => void;
+    resumeLiveForwarding: () => void;
+  } {
+    let output = '';
+    let suppressLive = false;
+    const stream = new Writable({
+      write: (chunk, _encoding, callback) => {
+        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        if (output.length < ContainerExecutorService.MAX_OUTPUT_BYTES) {
+          output += text;
+        }
+        // Skip forwarding during reconnect replay to avoid duplicating
+        // lines in the live console. The buffer still accumulates for the
+        // final snapshot (which replaces it anyway).
+        if (!suppressLive && options.onStdoutChunk) {
+          try {
+            void options.onStdoutChunk(text);
+          } catch {
+            /* ignore log callback failures */
+          }
+        }
+        callback();
+      },
+    });
+    const streamWithControls = Object.assign(stream, {
+      suppressLiveForwarding: () => {
+        suppressLive = true;
+      },
+      resumeLiveForwarding: () => {
+        suppressLive = false;
+      },
+    });
+
+    return {
+      stream: streamWithControls,
+      getOutput: () => output,
+      suppressLiveForwarding: streamWithControls.suppressLiveForwarding,
+      resumeLiveForwarding: streamWithControls.resumeLiveForwarding,
+    };
+  }
+
+  /**
+   * Start log streaming with automatic reconnect on network errors.
+   *
+   * K8s log follow streams can disconnect prematurely due to API server
+   * timeouts, load-balancer idle timeouts, or transient network blips.
+   * When the stream drops, we wait briefly and reconnect using
+   * `sinceSeconds` so the API server resumes from roughly where we left
+   * off (duplicates are harmless — the collector appends to the same
+   * buffer and the final snapshot replaces it anyway).
+   *
+   * Completion is determined by `waitForExecutionOutcome()` (exit-code
+   * file polling), NOT by the log stream lifecycle.
+   *
+   * On reconnect, `sinceSeconds: 5` replays the last few seconds to
+   * avoid gaps. The collector's live-forwarding is suppressed during
+   * the replay window so duplicate lines are not published to the
+   * live console via `onStdoutChunk`.
+   */
+  private startLogStreamWithReconnect(
+    podName: string,
+    sink: Writable & { suppressLiveForwarding?: () => void; resumeLiveForwarding?: () => void },
+    jobName: string,
+  ): AbortController {
+    const controller = new AbortController();
+    const reconnectDelayMs = 2_000;
+    // Allow up to 60 reconnect attempts (~2 min) so that cold-node image
+    // pulls (3+ GB worker image) don't exhaust reconnects before the
+    // container starts.  Once the stream is established the reconnect
+    // counter only matters for mid-stream network blips, which are rare.
+    const maxReconnects = 60;
+    const sinceSecondsOnReconnect = 5;
+
+    const connect = async (attempt: number) => {
+      if (controller.signal.aborted) return;
+
+      // On reconnect, suppress live forwarding for the replay window
+      // to prevent duplicating lines in the user-visible streaming output.
+      let replayTimer: ReturnType<typeof setTimeout> | null = null;
+      if (attempt > 0 && sink.suppressLiveForwarding) {
+        sink.suppressLiveForwarding();
+        // Resume after the replay window (sinceSeconds + reconnect delay buffer)
+        replayTimer = setTimeout(() => {
+          sink.resumeLiveForwarding?.();
+          replayTimer = null;
+        }, (sinceSecondsOnReconnect + 1) * 1_000);
+      }
+
+      try {
+        const abort = await this.logClient!.log(
+          this.executionNamespace,
+          podName,
+          'execution',
+          sink,
+          {
+            follow: true,
+            timestamps: false,
+            ...(attempt > 0 ? { sinceSeconds: sinceSecondsOnReconnect } : {}),
+          },
+        );
+
+        // When the outer controller is aborted, also abort the active stream.
+        const onAbort = () => abort.abort();
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+
+        // Listen for the underlying response closing unexpectedly.
+        // The K8s client resolves the log call immediately once the
+        // stream is established; the actual data flows via piping.
+        // We detect disconnects through the response's 'close' / 'error'
+        // events surfacing on the underlying socket, which k8s client-node
+        // propagates by aborting its own internal controller.
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            controller.signal.removeEventListener('abort', onAbort);
+            if (replayTimer) {
+              clearTimeout(replayTimer);
+              sink.resumeLiveForwarding?.();
+            }
+            if (!controller.signal.aborted && attempt < maxReconnects) {
+              this.logger.warn(
+                `Log stream for ${jobName} disconnected (attempt ${attempt + 1}/${maxReconnects}), reconnecting in ${reconnectDelayMs}ms`,
+              );
+              setTimeout(() => connect(attempt + 1), reconnectDelayMs);
+            }
+          },
+          { once: true },
+        );
+      } catch (error) {
+        if (replayTimer) {
+          clearTimeout(replayTimer);
+          sink.resumeLiveForwarding?.();
+        }
+        if (controller.signal.aborted) return;
+        if (attempt < maxReconnects) {
+          this.logger.warn(
+            `Failed to start log stream for ${jobName} (attempt ${attempt + 1}/${maxReconnects}): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          setTimeout(() => connect(attempt + 1), reconnectDelayMs);
+        } else {
+          this.logger.warn(
+            `Exhausted log stream reconnect attempts for ${jobName}; final logs will be fetched via snapshot`,
+          );
+        }
+      }
+    };
+
+    void connect(0);
+    return controller;
+  }
+
+  private async fetchPodLogsSnapshot(podName: string): Promise<string> {
+    const chunks: Buffer[] = [];
+    const sink = new Writable({
+      write: (chunk, _encoding, callback) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    await this.logClient!.log(
+      this.executionNamespace,
+      podName,
+      'execution',
+      sink,
+      { follow: false, timestamps: false },
+    );
+    await finished(sink);
+
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
+  private async waitForExecutionOutcome(
+    podName: string,
+    workspace: string,
+    timeoutMs: number,
+  ): Promise<{ exitCode: number; timedOut: boolean; cancelled: boolean; message?: string }> {
+    const startedAt = Date.now();
+    const timeoutAt = Date.now() + timeoutMs;
+    const exitCodeFile = this.getWorkspaceExitCodeFile(workspace);
+
+    while (Date.now() < timeoutAt) {
+      const exitCode = await this.readExecutionExitCode(podName, exitCodeFile);
+      if (exitCode !== null) {
+        return {
+          exitCode,
+          timedOut: false,
+          cancelled: false,
+        };
+      }
+
+      let pod;
+      try {
+        pod = await this.coreApi!.readNamespacedPod({
+          name: podName,
+          namespace: this.executionNamespace,
+        });
+      } catch (podError) {
+        const msg = podError instanceof Error ? podError.message : String(podError);
+        if (msg.includes('404') || msg.includes('NotFound') || msg.includes('not found')) {
+          // Pod was deleted externally — most likely by the cancellation poller.
+          // Treat as a user-initiated cancellation so processors record it correctly
+          // instead of returning a generic exitCode=1 failure.
+          this.logger.warn(
+            `Pod ${podName} no longer exists — treating as cancellation`,
+          );
+          return {
+            exitCode: 137,
+            timedOut: false,
+            cancelled: true,
+            message: 'Pod deleted during execution (cancelled)',
+          };
+        }
+        throw podError;
+      }
+
+      const terminated = pod.status?.containerStatuses
+        ?.find((container) => container.name === 'execution')
+        ?.state?.terminated;
+      if (terminated) {
+        const timedOut =
+          terminated.reason === 'DeadlineExceeded' ||
+          terminated.message?.includes('DeadlineExceeded') === true;
+        return {
+          exitCode: terminated.exitCode ?? (timedOut ? 124 : 1),
+          timedOut,
+          cancelled: terminated.exitCode === 137,
+          message: terminated.message || terminated.reason,
+        };
+      }
+
+      await this.sleep(
+        this.getExecutionOutcomePollIntervalMs(startedAt, timeoutAt),
+      );
+    }
+
+    return {
+      exitCode: 124,
+      timedOut: true,
+      cancelled: false,
+      message: `Execution timed out after ${timeoutMs}ms`,
+    };
+  }
+
+  private getExecutionOutcomePollIntervalMs(
+    startedAt: number,
+    timeoutAt: number,
+  ): number {
+    const elapsedMs = Date.now() - startedAt;
+    let intervalMs = ContainerExecutorService.OUTCOME_POLL_SLOW_MS;
+
+    if (elapsedMs < ContainerExecutorService.OUTCOME_POLL_FAST_UNTIL_MS) {
+      intervalMs = ContainerExecutorService.OUTCOME_POLL_FAST_MS;
+    } else if (
+      elapsedMs < ContainerExecutorService.OUTCOME_POLL_MEDIUM_UNTIL_MS
+    ) {
+      intervalMs = ContainerExecutorService.OUTCOME_POLL_MEDIUM_MS;
+    }
+
+    const remainingMs = Math.max(250, timeoutAt - Date.now());
+    return Math.min(intervalMs, remainingMs);
+  }
+
+  private async readExecutionExitCode(
+    podName: string,
+    exitCodeFile: string,
+  ): Promise<number | null> {
+    const command = [
+      '/bin/sh',
+      '-c',
+      `if [ -f ${this.escapeShellArg(exitCodeFile)} ]; then cat ${this.escapeShellArg(exitCodeFile)}; fi`,
+    ];
+    const stdout = await this.execInPod(podName, command).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Log exec failures at warn level on first occurrence so RBAC / connectivity
+      // problems are immediately visible in production instead of being silently
+      // swallowed at debug level for the entire timeout window.
+      if (!this.execFailureLogged.has(podName)) {
+        this.execFailureLogged.add(podName);
+        this.logger.warn(
+          `Exit code read via exec failed for ${podName} (will retry silently): ${msg}`,
+        );
+      } else {
+        this.logger.debug(
+          `Exit code read failed for ${podName}: ${msg}`,
+        );
+      }
+      return '';
+    });
+    const trimmed = stdout.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const exitCode = Number.parseInt(trimmed, 10);
+    return Number.isFinite(exitCode) ? exitCode : null;
+  }
+
+  private async execInPod(podName: string, command: string[]): Promise<string> {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const stdout = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+    const stderr = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    const socket = await this.execClient!.exec(
+      this.executionNamespace,
+      podName,
+      'execution',
+      command,
+      stdout,
+      stderr,
+      null,
+      false,
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      socket.on('close', () => resolve());
+      socket.on('error', (error) => reject(error));
+    });
+
+    const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+    if (stderrText) {
+      this.logger.debug(`exec stderr from ${podName}: ${stderrText}`);
+    }
+
+    return Buffer.concat(stdoutChunks).toString('utf8');
+  }
+
+  private async signalExecutionExit(
+    podName: string,
+    workspace: string,
+  ): Promise<void> {
+    const exitSignalFile = this.getWorkspaceExitSignalFile(workspace);
+    await this.execInPod(podName, [
+      '/bin/sh',
+      '-c',
+      `touch ${this.escapeShellArg(exitSignalFile)}`,
+    ]);
+  }
+
+  private async extractPodArtifacts(
+    podName: string,
+    sourcePath: string,
+    destPath: string,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const cleanSource = sourcePath.replace(/\/\.$/g, '');
+    if (!this.isPathWithinBase(cleanSource, workspaceRoot)) {
+      throw new Error(`Refusing to extract artifacts outside workspace: ${cleanSource}`);
+    }
+
+    const archive = await this.capturePodTarStream(podName, cleanSource);
+    if (archive.length === 0) {
+      this.logger.debug(`No artifacts found at ${cleanSource} in ${podName}`);
+      return;
+    }
+
+    await fs.mkdir(destPath, { recursive: true });
+    await this.validateTarArchive(archive);
+    const extractor = tar.x({
+      cwd: destPath,
+      preservePaths: false,
+      strict: true,
+      filter: (entryPath, entry) => {
+        this.validateTarEntry(entryPath, entry);
+        return true;
+      },
+    });
+    await finished(Readable.from(archive).pipe(extractor));
+  }
+
+  private async capturePodTarStream(
+    podName: string,
+    sourcePath: string,
+  ): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    const stdout = new Writable({
+      write: (chunk, _encoding, callback) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += buffer.length;
+        if (totalBytes > ContainerExecutorService.MAX_ARTIFACT_ARCHIVE_BYTES) {
+          callback(
+            new Error(
+              `Artifact archive exceeded ${ContainerExecutorService.MAX_ARTIFACT_ARCHIVE_BYTES} bytes`,
+            ),
+          );
+          return;
+        }
+        chunks.push(buffer);
+        callback();
+      },
+    });
+    const stderrChunks: Buffer[] = [];
+    const stderr = new Writable({
+      write: (chunk, _encoding, callback) => {
+        stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+        callback();
+      },
+    });
+
+    const command = [
+      '/bin/sh',
+      '-c',
+      `if [ -e ${this.escapeShellArg(sourcePath)} ]; then tar cf - -C ${this.escapeShellArg(sourcePath)} .; fi`,
+    ];
+    const socket = await this.execClient!.exec(
+      this.executionNamespace,
+      podName,
+      'execution',
+      command,
+      stdout,
+      stderr,
+      null,
+      false,
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      socket.on('close', () => resolve());
+      socket.on('error', (error) => reject(error));
+    });
+
+    const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+    if (stderrText) {
+      throw new Error(`tar extraction failed: ${stderrText}`);
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  private async validateTarArchive(archive: Buffer): Promise<void> {
+    const parser = tar.t({
+      onReadEntry: (entry) => {
+        this.validateTarEntry(entry.path, entry);
+        entry.resume();
+      },
+    });
+    await finished(Readable.from(archive).pipe(parser));
+  }
+
+  private validateTarEntry(
+    entryPath: string,
+    entry: unknown,
+  ): void {
+    const normalized = entryPath.replace(/\\/g, '/');
+    if (
+      path.posix.isAbsolute(normalized) ||
+      normalized.split('/').includes('..')
+    ) {
+      throw new Error(`Unsafe path in artifact archive: ${entryPath}`);
+    }
+
+    const disallowedTypes = new Set([
+      'SymbolicLink',
+      'Link',
+      'CharacterDevice',
+      'BlockDevice',
+      'FIFO',
+      'ContiguousFile',
+    ]);
+    const entryType =
+      entry && typeof entry === 'object' && 'type' in entry
+        ? (entry as { type?: string }).type
+        : undefined;
+    if (entryType && disallowedTypes.has(entryType)) {
+      throw new Error(`Unsupported artifact entry type: ${entryType}`);
+    }
+  }
+
+  private getWorkspaceExitCodeFile(workspace: string): string {
+    return `${workspace}/.supercheck-exit-code`;
+  }
+
+  private getWorkspaceExitSignalFile(workspace: string): string {
+    return `${workspace}/.supercheck-exit-now`;
+  }
+
+  private rewriteTmpPath(value: string, workspace: string): string {
+    if (value.startsWith('/tmp/')) {
+      return this.resolveWorkspacePath(workspace, value);
+    }
+    if (value === '/tmp' || value === '/tmp/') {
+      return workspace;
+    }
+    return value;
+  }
+
+  private escapeShellArg(value: string): string {
+    return `'${value.replace(/'/g, "'\\''")}'`;
+  }
+
+  private startKubernetesCancellationPoller(
+    runId: string,
+    jobName: string,
+    onCancelled: () => void,
+  ): NodeJS.Timeout {
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const isCancelled = await this.cancellationService.isCancelled(runId);
+          if (!isCancelled) {
+            return;
+          }
+
+          this.logger.warn(
+            `[${runId}] Cancellation detected — deleting execution job ${jobName}`,
+          );
+          onCancelled();
+          await this.deleteExecutionJob(jobName);
+          await this.cancellationService.clearCancellationSignal(runId);
+          clearInterval(interval);
+          this.activeCancellationIntervals.delete(interval);
+        } catch (error) {
+          this.logger.error(
+            `Cancellation check error: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })();
+    }, 1000);
+
+    this.activeCancellationIntervals.add(interval);
+    return interval;
+  }
+
+  private async deleteExecutionJob(jobName: string): Promise<void> {
+    if (!jobName) {
+      return;
+    }
+
+    try {
+      await this.ensureKubernetesClients();
+      await this.batchApi!.deleteNamespacedJob({
+        name: jobName,
+        namespace: this.executionNamespace,
+        gracePeriodSeconds: 0,
+        propagationPolicy: 'Background',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !message.includes('404') &&
+        !message.includes('NotFound') &&
+        !message.includes('not found')
+      ) {
+        this.logger.warn(`Failed to delete execution job ${jobName}: ${message}`);
+      }
+    }
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private buildWorkspacePath(runId?: string): string {
+    const rawToken = runId || crypto.randomUUID();
+    const safeToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex')
+      .slice(0, 24);
+    return `${ContainerExecutorService.WORKSPACE_ROOT}/run-${safeToken}`;
+  }
+
+  private isPathWithinBase(candidatePath: string, basePath: string): boolean {
+    const normalizedBase = path.posix.normalize(basePath).replace(/\/+$/, '');
+    const normalizedCandidate = path.posix.normalize(candidatePath);
+    return (
+      normalizedCandidate === normalizedBase ||
+      normalizedCandidate.startsWith(`${normalizedBase}/`)
+    );
+  }
+
+  private normalizeRelativeWorkspacePath(
+    value: string,
+    label: string,
+  ): { valid: boolean; normalized?: string; error?: string } {
+    return this.normalizeWorkspaceScopedPath(value, label, {
+      allowAbsoluteTmp: false,
+      allowWorkspaceRoot: false,
+    });
+  }
+
+  private normalizeWorkspaceScopedPath(
+    value: string,
+    label: string,
+    options: { allowAbsoluteTmp?: boolean; allowWorkspaceRoot?: boolean } = {},
+  ): { valid: boolean; normalized?: string; error?: string } {
+    const { allowAbsoluteTmp = true, allowWorkspaceRoot = false } = options;
+
+    if (!value || typeof value !== 'string') {
+      return {
+        valid: false,
+        error: `${label} must be a non-empty string`,
+      };
+    }
+
+    if (/[\0\r\n]/.test(value)) {
+      return {
+        valid: false,
+        error: `${label} contains invalid control characters`,
+      };
+    }
+
+    const normalizedInput = path.posix.normalize(value.replace(/\\/g, '/'));
+    if (allowAbsoluteTmp && (normalizedInput === '/tmp' || normalizedInput.startsWith('/tmp/'))) {
+      return {
+        valid: true,
+        normalized: normalizedInput,
+      };
+    }
+
+    if (path.posix.isAbsolute(normalizedInput)) {
+      return {
+        valid: false,
+        error: `${label} must stay within the execution workspace`,
+      };
+    }
+
+    if (
+      normalizedInput === '..' ||
+      normalizedInput.startsWith('../')
+    ) {
+      return {
+        valid: false,
+        error: `${label} must not escape the execution workspace`,
+      };
+    }
+
+    if (normalizedInput === '.') {
+      return allowWorkspaceRoot
+        ? { valid: true, normalized: normalizedInput }
+        : {
+            valid: false,
+            error: `${label} must point to a child path inside the execution workspace`,
+          };
+    }
+
+    if (!normalizedInput || normalizedInput === '/') {
+      return {
+        valid: false,
+        error: `${label} must be a non-empty path`,
+      };
+    }
+
+    return {
+      valid: true,
+      normalized: normalizedInput,
+    };
+  }
+
+  private resolveWorkspacePath(workspace: string, containerPath: string): string {
+    const normalizedPath = path.posix.normalize(containerPath.replace(/\\/g, '/'));
+    if (normalizedPath === '/tmp' || normalizedPath === '/tmp/') {
+      return workspace;
+    }
+    if (normalizedPath.startsWith('/tmp/')) {
+      return path.posix.join(workspace, normalizedPath.slice('/tmp/'.length));
+    }
+    if (normalizedPath === '.') {
+      return workspace;
+    }
+    return path.posix.join(workspace, normalizedPath);
+  }
+
+  private parseExecutionNodeSelector(
+    rawValue?: string,
+  ): Record<string, string> | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+          throw new Error('value must be a JSON object');
+        }
+
+        const selector = Object.fromEntries(
+          Object.entries(parsed).flatMap(([key, value]) => {
+            if (!key.trim() || typeof value !== 'string' || !value.trim()) {
+              return [];
+            }
+            return [[key.trim(), value.trim()]];
+          }),
+        );
+
+        return Object.keys(selector).length > 0 ? selector : undefined;
+      } catch (error) {
+        this.logger.warn(
+          `Invalid EXECUTION_NODE_SELECTOR value; ignoring custom selector: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return undefined;
+      }
+    }
+
+    const selector: Record<string, string> = {};
+    for (const rawPair of trimmed.split(',')) {
+      const [rawKey, ...rawValueParts] = rawPair.split('=');
+      const key = rawKey?.trim();
+      const value = rawValueParts.join('=').trim();
+      if (!key || !value) {
+        this.logger.warn(
+          'Invalid EXECUTION_NODE_SELECTOR value; expected key=value pairs',
+        );
+        return undefined;
+      }
+      selector[key] = value;
+    }
+
+    return Object.keys(selector).length > 0 ? selector : undefined;
+  }
+
+  private parseExecutionTolerations(
+    rawValue?: string,
+  ): k8s.V1Toleration[] | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!Array.isArray(parsed)) {
+        throw new Error('value must be a JSON array');
+      }
+
+      const tolerations = parsed.filter(
+        (item): item is k8s.V1Toleration =>
+          !!item && typeof item === 'object' && !Array.isArray(item),
+      );
+
+      return tolerations.length > 0 ? tolerations : undefined;
+    } catch (error) {
+      this.logger.warn(
+        `Invalid EXECUTION_TOLERATIONS_JSON value; ignoring custom tolerations: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
     }
   }
 
   /**
-   * Checks if Docker is available and the required image exists
+   * Parses EXECUTION_DNS_NAMESERVERS into a list of IP addresses.
+   * Accepts a comma-separated string of nameserver IPs.
+   * Example: "169.254.20.10,10.43.0.10"
+   *
+   * When set, execution pods use dnsPolicy: None with these explicit
+   * nameservers. When not set, pods use the default ClusterFirst policy.
    */
-  private async checkDockerAvailable(): Promise<boolean> {
-    try {
-      // Check if Docker daemon is running
-      const result = await execa('docker', ['--version'], {
-        timeout: 5000,
-        reject: false,
-      });
+  private parseExecutionDnsNameservers(
+    rawValue?: string,
+  ): string[] | undefined {
+    const trimmed = rawValue?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
 
-      if (result.exitCode !== 0) {
-        return false;
-      }
-
-      // Check if required image exists locally
-      const imageCheck = await execa(
-        'docker',
-        ['images', '-q', this.defaultImage],
-        {
-          timeout: 5000,
-          reject: false,
-        },
-      );
-
-      // If image doesn't exist, try to pull it automatically
-      if (!imageCheck.stdout || imageCheck.stdout.trim() === '') {
-        this.logger.warn(
-          `Docker image ${this.defaultImage} not found locally. Attempting to pull...`,
-        );
-
-        try {
-          const pullResult = await execa(
-            'docker',
-            ['pull', this.defaultImage],
-            {
-              timeout: 120000, // 2 minutes for pull
-              reject: false,
-            },
-          );
-
-          if (pullResult.exitCode === 0) {
-            this.logger.log(
-              `Successfully pulled Docker image: ${this.defaultImage}`,
-            );
-            return true;
-          } else {
-            this.logger.warn(
-              `Failed to pull Docker image: ${pullResult.stderr}`,
-            );
-            return false;
-          }
-        } catch (pullError) {
+    const nameservers = Array.from(
+      new Set(
+        trimmed
+          .split(',')
+          .map((ns) => ns.trim()),
+      ),
+    )
+      .filter((ns) => {
+        if (!ns) return false;
+        if (!this.isValidIpv4Address(ns)) {
           this.logger.warn(
-            `Could not pull Docker image: ${pullError instanceof Error ? pullError.message : String(pullError)}`,
+            `Invalid nameserver IP in EXECUTION_DNS_NAMESERVERS: "${ns}"; skipping`,
           );
           return false;
         }
-      }
+        return true;
+      });
 
-      return true;
-    } catch {
+    return nameservers.length > 0 ? nameservers : undefined;
+  }
+
+  private isValidIpv4Address(value: string): boolean {
+    const octets = value.split('.');
+    if (octets.length !== 4) {
       return false;
     }
-  }
 
-  /**
-   * Force removes a Docker container
-   */
-  /**
-   * Kills a running container immediately
-   */
-  private async killContainer(containerName: string): Promise<void> {
-    try {
-      this.logger.warn(`Killing container: ${containerName}`);
-      // Use docker kill for immediate termination (faster than stop)
-      await execa('docker', ['kill', containerName], {
-        timeout: 5000,
-        reject: false,
-      });
-      // Then remove the container
-      await this.forceRemoveContainer(containerName);
-    } catch (error) {
-      this.logger.error(
-        `Failed to kill container ${containerName}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      // Try force remove as fallback
-      await this.forceRemoveContainer(containerName);
-    }
-  }
-
-  private async forceRemoveContainer(containerName: string): Promise<void> {
-    try {
-      this.logger.log(`Force removing container: ${containerName}`);
-      await execa('docker', ['rm', '-f', containerName], {
-        timeout: 10000,
-        reject: false,
-      });
-    } catch (error) {
-      this.logger.error(
-        `Failed to remove container ${containerName}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
-  /**
-   * Lists running containers created by this service
-   */
-  async listActiveContainers(): Promise<string[]> {
-    try {
-      const result = await execa(
-        'docker',
-        ['ps', '--filter', 'name=supercheck-exec-*', '--format', '{{.Names}}'],
-        {
-          timeout: 5000,
-          reject: false,
-        },
-      );
-
-      if (result.exitCode === 0 && result.stdout) {
-        return result.stdout.split('\n').filter((name) => name.length > 0);
+    return octets.every((octet) => {
+      if (!/^\d{1,3}$/.test(octet)) {
+        return false;
       }
-    } catch (error) {
-      this.logger.error(
-        `Failed to list containers: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    return [];
+      const numericValue = Number.parseInt(octet, 10);
+      return numericValue >= 0 && numericValue <= 255;
+    });
   }
 
+  // =====================================================================
+  //  Shell script builder
+  // =====================================================================
+
   /**
-   * Cleans up all orphaned containers
+   * Builds the shell script that runs inside the execution environment.
+   *
+   * Base64-decodes inline scripts, creates directories, symlinks
+   * node_modules, then executes the command.
    */
-  async cleanupOrphanedContainers(): Promise<number> {
-    const containers = await this.listActiveContainers();
-    let cleaned = 0;
+  buildShellScript(
+    options: ContainerExecutionOptions & { _workspace?: string },
+    command: string[],
+  ): string {
+    const shellCommands: string[] = [];
 
-    for (const container of containers) {
-      await this.forceRemoveContainer(container);
-      cleaned++;
+    // Per-run workspace: isolates each execution to prevent cross-tenant
+    // file contamination (GVISOR-002). Production always uses a dedicated
+    // hashed workspace under /tmp/supercheck.
+    const ws = options._workspace || this.buildWorkspacePath(options.runId);
+    shellCommands.push(`mkdir -p '${ws.replace(/'/g, "'\\''")}'`);
+
+    // Ensure required directories exist before writing files
+    if (options.ensureDirectories && options.ensureDirectories.length > 0) {
+      const uniqueDirs = Array.from(new Set(options.ensureDirectories));
+      for (const dir of uniqueDirs) {
+        if (!dir || typeof dir !== 'string') {
+          continue;
+        }
+        const resolvedDir = this.resolveWorkspacePath(ws, dir);
+        const escapedDir = resolvedDir.replace(/'/g, "'\\''");
+        shellCommands.push(`mkdir -p '${escapedDir}'`);
+      }
     }
 
-    if (cleaned > 0) {
-      this.logger.log(`Cleaned up ${cleaned} orphaned containers`);
+    // Symlink node_modules into workspace so specs can resolve dependencies.
+    // Each run gets its own symlink — no shared /tmp/node_modules.
+    const wsEscaped = ws.replace(/'/g, "'\\''");
+    shellCommands.push(
+      `[ -d "$PWD/node_modules" ] && [ ! -e '${wsEscaped}/node_modules' ] && ln -s "$PWD/node_modules" '${wsEscaped}/node_modules' || true`,
+    );
+
+    // Write main script file via base64 decode
+    // Filename is pre-validated by SAFE_FILENAME_RE in executeInContainer.
+    const scriptContent = Buffer.from(options.inlineScriptContent!).toString(
+      'base64',
+    );
+    const scriptPath = `${ws}/${options.inlineScriptFileName}`;
+    const escapedScriptPath = scriptPath.replace(/'/g, "'\\''");
+    shellCommands.push(
+      `printf '%s' "${scriptContent}" | base64 -d > '${escapedScriptPath}'`,
+    );
+    shellCommands.push(`chmod +x '${escapedScriptPath}'`);
+
+    // Write additional files if provided
+    // Paths are pre-validated (no absolute, no '..') in executeInContainer.
+    if (options.additionalFiles) {
+      for (const [filePath, content] of Object.entries(
+        options.additionalFiles,
+      )) {
+        const encodedContent = Buffer.from(content).toString('base64');
+        const targetPath = path.posix.join(ws, filePath);
+        const escapedTarget = targetPath.replace(/'/g, "'\\''");
+        // Ensure parent directory exists for nested files
+        const parentDir = path.posix.dirname(targetPath);
+        if (parentDir && parentDir !== ws) {
+          shellCommands.push(`mkdir -p '${parentDir.replace(/'/g, "'\\''")}'`);
+        }
+        shellCommands.push(
+          `printf '%s' "${encodedContent}" | base64 -d > '${escapedTarget}'`,
+        );
+      }
     }
 
-    return cleaned;
+    // Build the execution command with proper quoting.
+    // Replace both the bare filename and /tmp/<filename> references with the
+    // workspace-scoped path so callers that pass /tmp/ paths still work.
+    const adjustedCommand = command.map((arg) => {
+      if (arg === options.inlineScriptFileName) return scriptPath;
+      if (!options._workspace) return arg;
+      // Rewrite /tmp/ prefixed paths to the per-run workspace
+      if (arg.startsWith('/tmp/')) {
+        return `${ws}/${arg.slice(5)}`;
+      }
+      if (arg === '/tmp/' || arg === '/tmp') {
+        return `${ws}/`;
+      }
+      // Rewrite embedded /tmp/ paths in key=value style args (e.g. json=/tmp/k6-output/metrics.json)
+      const eqIdx = arg.indexOf('=/tmp/');
+      if (eqIdx !== -1) {
+        return `${arg.slice(0, eqIdx + 1)}${ws}/${arg.slice(eqIdx + 6)}`;
+      }
+      return arg;
+    });
+    const quotedCommand = adjustedCommand
+      .map((arg) => this.escapeShellArg(arg))
+      .join(' ');
+    shellCommands.push(quotedCommand);
+
+    return shellCommands.join(' && ');
   }
 
+  // =====================================================================
+  //  Resource limit validation
+  // =====================================================================
+
   /**
-   * Validates resource limits to prevent dangerous or invalid configurations
-   * Returns validated limits or an error if limits are outside acceptable bounds
+   * Validates resource limits to prevent invalid configurations.
    */
-  private validateResourceLimits(limits: {
+  validateResourceLimits(limits: {
     memoryLimitMb: number;
     cpuLimit: number;
     timeoutMs: number;
-  }): {
-    valid: boolean;
-    error?: string;
-    memoryLimitMb: number;
-    cpuLimit: number;
-    timeoutMs: number;
-  } {
-    // Resource limit bounds (production-safe values)
-    const MIN_MEMORY_MB = 128; // Minimum viable for most tasks
-    const MAX_MEMORY_MB = 8192; // 8GB - reasonable upper bound
-    const MIN_CPU = 0.1; // 10% of a CPU core
-    const MAX_CPU = 4.0; // 4 CPU cores
-    const MIN_TIMEOUT_MS = 5000; // 5 seconds
-    const MAX_TIMEOUT_MS = 3600000; // 1 hour - matches JOB_EXECUTION_DEFAULT_MS in timeouts.constants.ts
+  }): ValidatedLimits {
+    const MIN_MEMORY_MB = 128;
+    const MAX_MEMORY_MB = 8192;
+    const MIN_CPU = 0.1;
+    const MAX_CPU = 4.0;
+    const MIN_TIMEOUT_MS = 5000;
+    const MAX_TIMEOUT_MS = 3600000;
 
     const errors: string[] = [];
 
-    // Validate memory
+    if (!Number.isFinite(limits.memoryLimitMb)) {
+      errors.push('memoryLimitMb must be a finite number');
+    }
+    if (!Number.isFinite(limits.cpuLimit)) {
+      errors.push('cpuLimit must be a finite number');
+    }
+    if (!Number.isFinite(limits.timeoutMs)) {
+      errors.push('timeoutMs must be a finite number');
+    }
+
     if (limits.memoryLimitMb < MIN_MEMORY_MB) {
       errors.push(
         `memoryLimitMb (${limits.memoryLimitMb}) is below minimum ${MIN_MEMORY_MB}MB`,
@@ -861,7 +1893,6 @@ export class ContainerExecutorService {
       );
     }
 
-    // Validate CPU
     if (limits.cpuLimit < MIN_CPU) {
       errors.push(`cpuLimit (${limits.cpuLimit}) is below minimum ${MIN_CPU}`);
     }
@@ -869,7 +1900,6 @@ export class ContainerExecutorService {
       errors.push(`cpuLimit (${limits.cpuLimit}) exceeds maximum ${MAX_CPU}`);
     }
 
-    // Validate timeout
     if (limits.timeoutMs < MIN_TIMEOUT_MS) {
       errors.push(
         `timeoutMs (${limits.timeoutMs}) is below minimum ${MIN_TIMEOUT_MS}ms`,

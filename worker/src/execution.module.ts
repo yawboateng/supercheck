@@ -1,14 +1,10 @@
-import { Module, Provider } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
-import { ConfigService } from '@nestjs/config';
-import { drizzle } from 'drizzle-orm/postgres-js';
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
-const postgres = require('postgres');
 
 // Import Services and Processors
 import { ExecutionService } from './execution/services/execution.service';
 import { S3Service } from './execution/services/s3.service';
-import { DbService, DB_PROVIDER_TOKEN } from './execution/services/db.service';
+import { DbService } from './execution/services/db.service';
 import { RedisService } from './execution/services/redis.service';
 import { JobNotificationService } from './execution/services/job-notification.service';
 import { UsageTrackerService } from './execution/services/usage-tracker.service';
@@ -20,8 +16,7 @@ import { NotificationModule } from './notification/notification.module';
 import { ReportUploadService } from './common/services/report-upload.service';
 import { SecurityModule } from './common/security/security.module';
 import { CancellationModule } from './common/services/cancellation.module';
-import * as schema from './db/schema';
-import { getSSLConfig } from './db/db-ssl';
+import { DbModule } from './db/db.module';
 
 // Import constants from constants file
 import { PLAYWRIGHT_QUEUE } from './execution/constants';
@@ -39,37 +34,9 @@ const defaultJobOptions = {
   },
 };
 
-// PostgreSQL database connection provider
-const drizzleProvider: Provider = {
-  provide: DB_PROVIDER_TOKEN,
-  inject: [ConfigService],
-  useFactory: (configService: ConfigService) => {
-    const connectionString = configService.get<string>('DATABASE_URL');
-    if (!connectionString) {
-      throw new Error('DATABASE_URL environment variable is not set!');
-    }
-
-    // Creating database connection with proper pooling for worker service
-    // Workers process jobs concurrently, so we need adequate connection pool
-
-    // Initialize the Postgres.js client with connection pooling
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
-    const client = postgres(connectionString, {
-      ssl: getSSLConfig(),
-      max: parseInt(process.env.DB_POOL_MAX || '10', 10), // Default: 10 connections
-      idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || '30', 10), // Default: 30 seconds
-      connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || '10', 10), // Default: 10 seconds
-      max_lifetime: parseInt(process.env.DB_MAX_LIFETIME || '1800', 10), // Default: 30 minutes (in seconds)
-    });
-
-    // Create and return the Drizzle ORM instance
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-    return drizzle(client, { schema });
-  },
-};
-
 @Module({
   imports: [
+    DbModule,
     NotificationModule,
     SecurityModule,
     CancellationModule,
@@ -79,8 +46,6 @@ const drizzleProvider: Provider = {
     }),
   ],
   providers: [
-    // Add database provider
-    drizzleProvider,
     // Add all services and processors here
     ExecutionService,
     S3Service,
@@ -97,7 +62,7 @@ const drizzleProvider: Provider = {
     PlaywrightExecutionProcessor,
   ],
   exports: [
-    drizzleProvider,
+    DbModule,
     DbService,
     RedisService,
     JobNotificationService,

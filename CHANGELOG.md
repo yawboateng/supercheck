@@ -4,6 +4,41 @@ All notable changes to Supercheck are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [1.3.3] - 2026-03-22
+
+> **⚠️ Breaking Change — New Execution Model**
+>
+> This release replaces the Docker socket-based test execution with a new sandboxed execution model powered by **K3s** and **gVisor**. Self-hosted deployments that previously used Docker Compose will need to run the new setup script (`setup-k3s.sh`) before upgrading. The worker container no longer requires access to the Docker socket.
+>
+> **What this means for self-hosted users:**
+> - A one-time infrastructure setup is required — run `sudo bash setup-k3s.sh` on your Linux host before starting services
+> - Linux (amd64/arm64) is required — Ubuntu 22.04+, Debian 12+, or equivalent
+> - The Docker Compose configuration has changed — the worker now mounts a Kubernetes kubeconfig instead of the Docker socket
+> - Existing tests and monitors continue to work without modification
+>
+> Please refer to the updated [self-hosted deployment guide](https://supercheck.io/docs/app/deployment/self-hosted) for step-by-step upgrade instructions.
+
+### Added
+- **Sandboxed execution with gVisor** — Test and monitor execution now runs inside gVisor-sandboxed Kubernetes pods, providing kernel-level isolation for all user-submitted scripts ([#276](https://github.com/supercheck-io/supercheck/issues/276))
+- **Dynamic locations system** — Locations are now database-managed instead of hardcoded constants. Super Admins can add, edit, and enable/disable locations from the admin dashboard. Workers dynamically discover regional queues. Per-project location restrictions are available ([#248](https://github.com/supercheck-io/supercheck/issues/248), [#249](https://github.com/supercheck-io/supercheck/issues/249), [#250](https://github.com/supercheck-io/supercheck/issues/250))
+
+### Changed
+- **Execution model migration** — Replaced Docker socket-based container execution with Kubernetes Jobs running under gVisor. Workers now use a scoped kubeconfig instead of mounting the Docker socket
+- Updated Docker Compose configuration — worker runs as non-root (UID 1000), read-only filesystem with tmpfs mounts, all capabilities dropped
+- Worker services now use Kubernetes API for container lifecycle management, log streaming, and artifact extraction
+- Improved deployment documentation with detailed infrastructure requirements and setup guides
+
+### Fixed
+- Improved dynamic worker stability — fixed queue discovery retry loops, heartbeat timing windows, stale queue cleanup, and graceful degradation when Redis is unavailable
+- Fixed multi-recipient alert email delivery for comma-separated email channels by sending messages sequentially over SMTP and reporting partial delivery failures accurately ([#269](https://github.com/supercheck-io/supercheck/issues/269))
+
+### Security
+- **gVisor sandboxing** — All user-submitted test scripts now execute under gVisor's userspace kernel, replacing the previous shared-kernel Docker isolation
+- Worker containers run with restricted Pod Security Standards — non-root user, read-only filesystem, all capabilities dropped, no privilege escalation
+- Network policies restrict execution pods from accessing internal services and cloud metadata endpoints
+- Updated Next.js to 16.1.7 — fixes request smuggling, CSRF bypass, and DoS vulnerabilities
+- Patched fast-xml-parser, file-type, yauzl, flatted, and ajv for various CVEs and DoS vulnerabilities
+
 
 ## [1.3.2] - 2026-03-12
 

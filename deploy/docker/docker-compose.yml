@@ -1,26 +1,28 @@
-# Supercheck - Development with Pre-built Images
+# Supercheck - Self-Hosted Deployment with Pre-built Images
 #
-# Use this for local testing with pre-built Docker images from GitHub Container Registry.
-# Includes all services: PostgreSQL, Redis, MinIO (S3), App, and Worker.
+# Use this for self-hosted deployments with pre-built Docker images from GitHub Container Registry.
+# Production execution uses the same Kubernetes Job + gVisor model as cloud by
+# pointing the worker at a local K3s cluster.
 #
 # Quick Start:
 #   1. Clone the repository
-#   2. Create .env with generated secrets (optional integrations can be added later)
-#   3. Run: docker compose up -d
-#   4. Access: http://localhost:3000
+#   2. Run: sudo bash setup-k3s.sh
+#   3. Create .env with generated secrets (optional integrations can be added later)
+#   4. Run: KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d
+#   5. Access: http://localhost:3000
 #
 # Upgrading:
 #   Set SUPERCHECK_VERSION in your .env file or shell environment:
 #     SUPERCHECK_VERSION=1.4.0 docker compose up -d
 #   This updates app, worker, and WORKER_IMAGE in one place.
 #
-# For production with HTTPS, use docker-compose-secure.yml instead.
+# For source-based local development, use docker-compose-local.yml instead.
 #
 # Data Persistence:
 #   PostgreSQL data is stored in a Docker named volume (postgres-data).
 #   IMPORTANT: Take regular backups! See Maintenance section in docs.
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories
@@ -79,7 +81,8 @@ x-common-env: &common-env # Database Configuration
   K6_JOB_EXECUTION_TIMEOUT_MS: ${K6_JOB_EXECUTION_TIMEOUT_MS:-3600000}
 
   # Worker Location for geo-distributed deployments
-  # Valid values: local, us-east, eu-central, asia-pacific
+  # Use "local" for single-server self-hosted mode, or set any enabled
+  # Super Admin location code (for example: us-east, eu-west, ap-south)
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # AWS S3 / MinIO Configuration
@@ -267,7 +270,7 @@ x-common-env: &common-env # Database Configuration
 services:
   # App (Next.js Frontend) - Handles migrations internally
   app:
-    image: ghcr.io/supercheck-io/supercheck/app:${SUPERCHECK_VERSION:-1.3.0}
+    image: ghcr.io/supercheck-io/supercheck/app:${SUPERCHECK_VERSION:-1.3.3}
     ports:
       - "3000:3000"
     environment:
@@ -298,26 +301,35 @@ services:
           cpus: "0.5"
           memory: 1G
 
-  # Worker (NestJS Runner) - Container-based test execution
-  # Tests run in isolated Docker containers (Playwright/K6), not inside worker
-  # Playwright Docker best practices: https://playwright.dev/docs/docker
+  # Worker (NestJS Runner)
+  # Self-hosted production uses the Kubernetes execution backend so Docker
+  # Compose and cloud deployments share the same per-run gVisor Job model.
   worker:
-    image: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-1.3.0}
+    image: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-1.3.3}
     # init: Use tini as PID 1 to avoid zombie processes (Playwright recommendation)
     init: true
+    # GVISOR-006: Run as non-root user (pwuser UID 1000 from Playwright image)
+    user: "1000:1000"
     environment:
       <<: *common-env
       # Worker-specific configuration (inherits all common env vars)
       # Note: MAX_CONCURRENT_EXECUTIONS=1 is hardcoded in worker code (scale via replicas)
-      # WORKER_IMAGE tells the worker which Docker image to use when spawning test execution containers
-      WORKER_IMAGE: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-1.3.0}
+      WORKER_IMAGE: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-1.3.3}
+      EXECUTION_NAMESPACE: ${EXECUTION_NAMESPACE:-supercheck-execution}
+      KUBECONFIG: /run/secrets/supercheck-kubeconfig
+    # GVISOR-006: Read-only root filesystem with writable tmpfs mounts
+    read_only: true
+    tmpfs:
+      - /tmp:size=2G,uid=1000,gid=1000,mode=1777
+      - /home/pwuser/.cache:size=256M,uid=1000,gid=1000,mode=0700
+      - /home/pwuser/.npm:size=256M,uid=1000,gid=1000,mode=0700
     volumes:
-      # Mount Docker socket for container-based execution
-      # Worker spawns isolated containers for Playwright and K6 tests
-      - /var/run/docker.sock:/var/run/docker.sock
       - worker-playwright-reports:/worker/playwright-reports
       - worker-k6-reports:/worker/k6-reports
       - worker-reports:/worker/report
+      - ${KUBECONFIG_FILE:-/etc/rancher/k3s/supercheck-worker.kubeconfig}:/run/secrets/supercheck-kubeconfig:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -344,6 +356,7 @@ services:
         limits:
           cpus: "1.8"
           memory: 3G
+          pids: 512
         reservations:
           cpus: "0.5"
           memory: 1G
@@ -355,11 +368,13 @@ services:
         delay: 15s
         window: 120s
 
-    # Security constraints for Docker-in-Docker
+    # GVISOR-006: Hardened security profile
     security_opt:
       - no-new-privileges:true # Prevent privilege escalation
-    # Note: Running as root with docker socket access requires careful capability management
-    # We do NOT drop all caps because docker socket access needs some privileges
+    cap_drop:
+      - ALL
+    # Note: gVisor runtime provides kernel-level syscall interception
+    # All child processes inherit the sandbox automatically
 
   # PostgreSQL Database
   postgres:
@@ -397,7 +412,7 @@ services:
       - "127.0.0.1:6379:6379"
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-supersecure-redis-password-change-this}
-    command: sh -c "rm -rf /data/* && redis-server --requirepass \"${REDIS_PASSWORD:-supersecure-redis-password-change-this}\" --maxmemory 256mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode yes --bind 0.0.0.0"
+    command: sh -c "rm -rf /data/* && redis-server --requirepass \"${REDIS_PASSWORD:-supersecure-redis-password-change-this}\" --maxmemory 256mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode yes --bind 0.0.0.0 --tcp-keepalive 300"
     volumes:
       - redis-data:/data
     restart: unless-stopped

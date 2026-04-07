@@ -163,7 +163,7 @@ Job `--type` selects the runner. Test `--type` uses API types: `browser`, `perfo
 Update job configuration.
 
 ```bash
-supercheck job update <job-id> --name "Updated Name" --status paused
+supercheck job update <job-id> --name "Updated Name"
 supercheck job update <job-id> --schedule "0 3 * * *" --dry-run
 ```
 
@@ -172,8 +172,9 @@ supercheck job update <job-id> --schedule "0 3 * * *" --dry-run
 | `--name` | Job name |
 | `--description` | Job description |
 | `--schedule` | Cron expression |
-| `--status` | `active` or `paused` |
 | `--dry-run` | Preview what would be sent without updating |
+
+Job status is runtime state, not configuration. Use `job run`, `job trigger`, or the dashboard/scheduler to affect execution state.
 
 ### `supercheck job delete`
 
@@ -208,6 +209,8 @@ supercheck job trigger <job-id> --wait --json
 |------|-------------|
 | `--wait` | Wait for the run to complete |
 | `--timeout` | Maximum wait time in seconds (default: 300) |
+
+`supercheck job trigger` requires `SUPERCHECK_TRIGGER_KEY`. If you also use `--wait`, set `SUPERCHECK_TOKEN` so the CLI can poll the run after triggering it.
 
 ### `supercheck job keys`
 
@@ -341,6 +344,7 @@ Update a test.
 
 ```bash
 supercheck test update <test-id> --title "Updated Title" --file ./updated-script.pw.ts
+supercheck test update <test-id> --type api --dry-run
 supercheck test update <test-id> --description "New description" --dry-run
 ```
 
@@ -348,6 +352,7 @@ supercheck test update <test-id> --description "New description" --dry-run
 |------|-------------|
 | `--title` | Test title |
 | `--file` | Path to updated test script |
+| `--type` | Test type (`browser`, `performance`, `api`, `database`, `custom`) |
 | `--description` | Test description |
 | `--dry-run` | Preview what would be sent without updating |
 
@@ -476,7 +481,7 @@ supercheck monitor create --name "Website" --url https://example.com --dry-run
 | `--type` | No | `http_request` | `http_request`, `website`, `ping_host`, `port_check`, `synthetic_test` |
 | `--interval-minutes` | No | `5` | Check interval in minutes (1–1440) |
 | `--timeout` | No | `30` | Request timeout in seconds |
-| `--method` | No | `GET` | HTTP method (`GET`, `POST`, `HEAD`) |
+| `--method` | No | `GET` | HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`) |
 | `--dry-run` | No | — | Preview what would be sent without creating |
 
 <Callout type="warn">
@@ -542,13 +547,17 @@ Create or update a variable.
 ```bash
 supercheck var set <key> <value>
 supercheck var set API_KEY sk-secret-value --secret
+printf '%s' \"$API_KEY\" | supercheck var set API_KEY --secret --value-stdin
 supercheck var set DB_URL postgres://... --description "Database connection string"
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--secret` | Mark as secret (value will be encrypted) |
+| `--value-stdin` | Read the value from stdin instead of the command line |
 | `--description` | Variable description |
+
+Prefer `--value-stdin` for secrets so they do not end up in shell history or process arguments.
 
 ### `supercheck var delete`
 
@@ -645,7 +654,9 @@ supercheck notification update <id> --type webhook --config '{...}'
 |------|-------------|
 | `--name` | Provider name |
 | `--type` | Provider type |
-| `--config` | JSON configuration string |
+| `--config` | JSON configuration string (replaces entire config — include all fields) |
+
+When a provider has secret fields (for example webhook URLs or API keys), the CLI never merges your input with masked values from the server. If you omit `--config`, only `--name` and `--type` are updated and existing secrets are preserved.
 
 ### `supercheck notification delete`
 

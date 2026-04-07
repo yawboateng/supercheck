@@ -1,18 +1,6 @@
 "use client";
 
-import {
-  MONITORING_LOCATIONS,
-  LOCATION_METADATA,
-  type MonitoringLocation,
-} from "@/lib/location-service";
-
-export type PerformanceLocation = MonitoringLocation | "global";
-
-export const PERFORMANCE_LOCATIONS: MonitoringLocation[] = [
-  MONITORING_LOCATIONS.US_EAST,
-  MONITORING_LOCATIONS.EU_CENTRAL,
-  MONITORING_LOCATIONS.ASIA_PACIFIC,
-];
+export type PerformanceLocation = string | "global";
 
 export type PerformanceLocationOption = {
   value: PerformanceLocation;
@@ -21,28 +9,39 @@ export type PerformanceLocationOption = {
   flag?: string;
 };
 
-export const PERFORMANCE_LOCATION_OPTIONS: PerformanceLocationOption[] = [
-  {
-    value: "global",
-    name: "Global",
-    region: "Global",
-    flag: "🌍",
-  },
-  ...PERFORMANCE_LOCATIONS.map((location) => {
-    const metadata = LOCATION_METADATA[location];
-    return {
-      value: location,
-      name: metadata?.name ?? location,
-      region: metadata?.region ?? "",
-      flag: metadata?.flag,
-    };
-  }),
-];
+/**
+ * Build the full list of performance location options (Global + per-location)
+ * from dynamic location data. Call this with data from the `useLocations()` hook.
+ */
+export function buildPerformanceLocationOptions(
+  locations: Array<{
+    code: string;
+    name: string;
+    region: string | null;
+    flag: string | null;
+  }>,
+  options: {
+    includeGlobal?: boolean;
+  } = {}
+): PerformanceLocationOption[] {
+  const includeGlobal = options.includeGlobal ?? true;
+
+  return [
+    ...(includeGlobal
+      ? [{ value: "global", name: "Global", region: "Global", flag: "🌍" }]
+      : []),
+    ...locations.map((loc) => ({
+      value: loc.code,
+      name: loc.name,
+      region: loc.region ?? "",
+      flag: loc.flag ?? undefined,
+    })),
+  ];
+}
 
 export function getPerformanceLocationOption(
-  value: PerformanceLocation
+  value: PerformanceLocation,
+  options: PerformanceLocationOption[]
 ): PerformanceLocationOption | undefined {
-  return PERFORMANCE_LOCATION_OPTIONS.find(
-    (option) => option.value === value
-  );
+  return options.find((option) => option.value === value);
 }

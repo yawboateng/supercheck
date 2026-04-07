@@ -159,6 +159,7 @@ S3_ENDPOINT=http://minio:9000
 # ────────────────────────────────────────────────────────────
 # WORKER_REPLICAS=1            # Number of worker containers (docker compose only)
 # RUNNING_CAPACITY=1           # App-side gate: max concurrent test runs (set equal to WORKER_REPLICAS)
+
 # ────────────────────────────────────────────────────────────
 # OPTIONAL: Customer Support (Cloud Only)
 # ────────────────────────────────────────────────────────────
@@ -200,10 +201,13 @@ echo -e "   1. Review optional integrations in .env (SMTP, AI, OAuth):"
 echo -e "      ${BLUE}nano .env${NC}"
 echo -e "      Set up SMTP for email notifications, AI provider for AI features, or OAuth for social login.${NC}"
 echo ""
-echo -e "   2. Start Supercheck:"
-echo -e "      ${BLUE}docker compose up -d${NC}"
+echo -e "   2. Install local K3s + gVisor:"
+echo -e "      ${BLUE}sudo bash setup-k3s.sh${NC}"
 echo ""
-echo -e "   3. Access at:"
+echo -e "   3. Start Supercheck:"
+echo -e "      ${BLUE}KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose up -d${NC}"
+echo ""
+echo -e "   4. Access at:"
 echo -e "      ${BLUE}http://localhost:3000${NC}"
 echo -e "      Create your first account with email/password"
 echo ""

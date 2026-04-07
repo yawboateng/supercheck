@@ -19,7 +19,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install all dependencies with better caching
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --legacy-peer-deps --no-audit --no-fund
 
 # Install production dependencies only for runtime
@@ -30,7 +30,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install production dependencies with better caching
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --omit=dev --legacy-peer-deps --no-audit --no-fund
 
 # Rebuild the source code only when needed

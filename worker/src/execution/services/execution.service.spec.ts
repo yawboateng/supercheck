@@ -21,9 +21,13 @@ jest.mock('fs/promises', () => ({
 }));
 
 // Mock fs sync
-jest.mock('fs', () => ({
-  existsSync: jest.fn().mockReturnValue(true),
-}));
+jest.mock('fs', () => {
+  const actual = jest.requireActual('fs');
+  return {
+    ...actual,
+    existsSync: jest.fn().mockReturnValue(true),
+  };
+});
 
 import {
   getContentType,

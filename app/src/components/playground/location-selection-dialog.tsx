@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -13,13 +13,13 @@ import { Button } from "@/components/ui/button";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import {
-  PERFORMANCE_LOCATION_OPTIONS,
-  PERFORMANCE_LOCATIONS,
+  buildPerformanceLocationOptions,
   getPerformanceLocationOption,
   type PerformanceLocation,
 } from "./performance-locations";
 import { LocationMapCard } from "@/components/location/location-map-card";
 import type { MonitoringLocation } from "@/lib/location-service";
+import { useAvailableLocations } from "@/hooks/use-locations";
 
 export type { PerformanceLocation } from "./performance-locations";
 
@@ -27,6 +27,7 @@ interface LocationSelectionDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (location: PerformanceLocation) => void;
+  /** Pre-selected location. Falls back to the first available option when not provided. */
   defaultLocation?: PerformanceLocation;
 }
 
@@ -34,25 +35,58 @@ export function LocationSelectionDialog({
   open,
   onOpenChange,
   onSelect,
-  defaultLocation = "global",
+  defaultLocation,
 }: LocationSelectionDialogProps) {
   const [selected, setSelected] =
-    useState<PerformanceLocation>(defaultLocation);
+    useState<PerformanceLocation>(defaultLocation ?? "global");
+
+  // Fetch dynamic locations from API
+  const { locations: dynamicLocations, hasRestrictions } = useAvailableLocations();
+
+  // Build options from dynamic data
+  const locationOptions = useMemo(() => {
+    if (dynamicLocations.length > 0) {
+      return buildPerformanceLocationOptions(dynamicLocations, {
+        includeGlobal: !hasRestrictions,
+      });
+    }
+    // Minimal fallback while loading
+    return buildPerformanceLocationOptions([], { includeGlobal: true });
+  }, [dynamicLocations, hasRestrictions]);
+
+  const fallbackLocation = useMemo(() => {
+    // If the caller provided a default and it exists in options, use it.
+    if (defaultLocation && locationOptions.some((option) => option.value === defaultLocation)) {
+      return defaultLocation;
+    }
+
+    // Otherwise, prefer the first *non-global* option (a real location),
+    // falling back to the first option (which may be "global").
+    const firstReal = locationOptions.find((o) => o.value !== "global");
+    return firstReal?.value ?? locationOptions[0]?.value ?? "global";
+  }, [defaultLocation, locationOptions]);
+
+  // Non-global location codes for the map
+  const locationCodes = useMemo(
+    () =>
+      locationOptions
+        .filter((o) => o.value !== "global")
+        .map((o) => o.value),
+    [locationOptions]
+  );
 
   // Track previous open state to detect transitions
   const wasOpen = useRef(open);
 
   // Sync default location when dialog opens (not while already open)
   useEffect(() => {
-    // Only run when dialog opens (not when already open)
     if (open && !wasOpen.current) {
-      // Defer setState to avoid synchronous setState in effect body
-      setTimeout(() => setSelected(defaultLocation), 0);
+      setTimeout(() => setSelected(fallbackLocation), 0);
     }
     wasOpen.current = open;
-  }, [defaultLocation, open]);
+  }, [fallbackLocation, open]);
 
-  const selectedOption = getPerformanceLocationOption(selected);
+  const selectedOption = getPerformanceLocationOption(selected, locationOptions);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -71,7 +105,7 @@ export function LocationSelectionDialog({
             onValueChange={(value) => setSelected(value as PerformanceLocation)}
             className="space-y-2"
           >
-            {PERFORMANCE_LOCATION_OPTIONS.map((option) => (
+            {locationOptions.map((option) => (
               <Label
                 key={option.value}
                 htmlFor={`location-${option.value}`}
@@ -94,7 +128,7 @@ export function LocationSelectionDialog({
           <LocationMapCard
             locations={
               (selected === "global"
-                ? PERFORMANCE_LOCATIONS
+                ? locationCodes
                 : selected
                   ? [selected]
                   : []) as MonitoringLocation[]

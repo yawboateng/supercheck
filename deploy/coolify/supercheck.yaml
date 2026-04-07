@@ -1,10 +1,12 @@
-# documentation: https://supercheck.io/docs/self-hosting
+# documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # slogan: Open Source AI-Powered Test Automation & Monitoring Platform
 # tags: automation, playwright, k6, testing, monitoring, ai, uptime, synthetic-monitors
 # logo: svgs/supercheck.svg
 # port: 3000
 
 # Supercheck Coolify One-Click Template
+# Important: run deploy/docker/setup-k3s.sh on the host first so the worker
+# can mount /etc/rancher/k3s/supercheck-worker.kubeconfig and submit gVisor Jobs.
 # https://github.com/supercheck-io/supercheck
 
 # YAML anchors for shared configuration
@@ -22,6 +24,7 @@ x-common-env: &common-env # Database Configuration
   REDIS_PASSWORD: supercheck-redis-password
   REDIS_URL: redis://:supercheck-redis-password@supercheck-redis:6379
   REDIS_TLS_ENABLED: false
+  REDIS_TLS_REJECT_UNAUTHORIZED: false
 
   # App Configuration
   # Coolify auto-provides SERVICE_URL_APP - override in Coolify Environment Variables if needed
@@ -31,6 +34,7 @@ x-common-env: &common-env # Database Configuration
   BETTER_AUTH_SECRET: ${SERVICE_BASE64_64_AUTH:-supercheck-auth-secret-change-me-in-production-32chars}
   NODE_ENV: production
   SHOW_COMMUNITY_LINKS: ${SHOW_COMMUNITY_LINKS:-true}
+  STATUS_PAGE_DOMAIN: ${STATUS_PAGE_DOMAIN:-localhost}
   STATUS_PAGE_HIDE_BRANDING: ${STATUS_PAGE_HIDE_BRANDING:-false}
 
   # App-Side Capacity Settings
@@ -122,14 +126,31 @@ x-common-env: &common-env # Database Configuration
   AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
   AI_TEMPERATURE: ${AI_TEMPERATURE:-0.1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  AZURE_RESOURCE_NAME: ${AZURE_RESOURCE_NAME:-}
+  AZURE_API_KEY: ${AZURE_API_KEY:-}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_API_VERSION: ${AZURE_API_VERSION:-2024-06-01}
+  AZURE_USE_MANAGED_IDENTITY: ${AZURE_USE_MANAGED_IDENTITY:-false}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+  GOOGLE_VERTEX_PROJECT: ${GOOGLE_VERTEX_PROJECT:-}
+  GOOGLE_VERTEX_LOCATION: ${GOOGLE_VERTEX_LOCATION:-us-central1}
+  BEDROCK_AWS_REGION: ${BEDROCK_AWS_REGION:-}
+  BEDROCK_AWS_ACCESS_KEY_ID: ${BEDROCK_AWS_ACCESS_KEY_ID:-}
+  BEDROCK_AWS_SECRET_ACCESS_KEY: ${BEDROCK_AWS_SECRET_ACCESS_KEY:-}
+  BEDROCK_AWS_SESSION_TOKEN: ${BEDROCK_AWS_SESSION_TOKEN:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
-  # Worker Location
+  # Worker Location (use "local" for single-server self-hosted mode,
+  # or any enabled Super Admin location code)
   WORKER_LOCATION: ${WORKER_LOCATION:-local}
 
   # Self-Hosted Mode
   SELF_HOSTED: true
+
+  # Registration Controls
+  SIGNUP_ENABLED: ${SIGNUP_ENABLED:-true}
+  ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
 
   # OAuth Configuration (Optional)
   GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
@@ -137,13 +158,10 @@ x-common-env: &common-env # Database Configuration
   GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
   GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
 
-  # Chatwoot Customer Support (Cloud Only - not used in self-hosted mode)
-  CHATWOOT_BASE_URL: ${CHATWOOT_BASE_URL:-}
-  CHATWOOT_WEBSITE_TOKEN: ${CHATWOOT_WEBSITE_TOKEN:-}
-
-  # CAPTCHA Configuration (Optional)
-  TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
-  TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+  # Queue Alerting Configuration (optional)
+  QUEUE_ALERTING_ENABLED: ${QUEUE_ALERTING_ENABLED:-true}
+  QUEUE_ALERT_SLACK_WEBHOOK_URL: ${QUEUE_ALERT_SLACK_WEBHOOK_URL:-}
+  QUEUE_ALERT_WEBHOOK_URL: ${QUEUE_ALERT_WEBHOOK_URL:-}
 
 services:
   # PostgreSQL Database
@@ -175,7 +193,7 @@ services:
   # Redis Cache & Queue
   supercheck-redis:
     image: redis:8
-    command: sh -c "rm -rf /data/* && redis-server --requirepass \"supercheck-redis-password\" --maxmemory 512mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode no --bind 0.0.0.0 --tcp-keepalive 300"
+    command: sh -c "rm -rf /data/* && redis-server --requirepass \"supercheck-redis-password\" --maxmemory 512mb --maxmemory-policy noeviction --save '' --appendonly no --protected-mode yes --bind 0.0.0.0 --tcp-keepalive 300"
     volumes:
       - supercheck-redis-data-v2:/data
     restart: unless-stopped
@@ -252,13 +270,26 @@ services:
   worker:
     image: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-latest}
     init: true
+    user: "1000:1000"
     environment:
       <<: *common-env
-      # WORKER_IMAGE tells the worker which Docker image to use when spawning test execution containers
       WORKER_IMAGE: ghcr.io/supercheck-io/supercheck/worker:${SUPERCHECK_VERSION:-latest}
+      EXECUTION_NAMESPACE: ${EXECUTION_NAMESPACE:-supercheck-execution}
+      KUBECONFIG: /run/secrets/supercheck-kubeconfig
+    # The long-lived worker is only the control plane.
+    # Untrusted code runs in K3s Jobs under runtimeClassName: gvisor.
+    read_only: true
+    tmpfs:
+      - /tmp:size=2G,uid=1000,gid=1000,mode=1777
+      - /home/pwuser/.cache:size=256M,uid=1000,gid=1000,mode=0700
+      - /home/pwuser/.npm:size=256M,uid=1000,gid=1000,mode=0700
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - supercheck-worker-playwright-reports:/worker/playwright-reports
+      - supercheck-worker-k6-reports:/worker/k6-reports
       - supercheck-worker-reports:/worker/report
+      - ${KUBECONFIG_FILE:-/etc/rancher/k3s/supercheck-worker.kubeconfig}:/run/secrets/supercheck-kubeconfig:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       supercheck-db:
         condition: service_healthy
@@ -280,16 +311,21 @@ services:
         limits:
           cpus: "1.8"
           memory: 3G
+          pids: 512
         reservations:
           cpus: "0.5"
           memory: 1G
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   supercheck-postgres-data-v10:
   supercheck-redis-data-v2:
   supercheck-minio-data:
+  supercheck-worker-playwright-reports:
+  supercheck-worker-k6-reports:
   supercheck-worker-reports:
 
 networks:

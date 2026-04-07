@@ -16,9 +16,11 @@ import { eq, and, sql, desc, inArray, type SQL } from 'drizzle-orm';
 import { ReportMetadata } from '../interfaces'; // Import our interface
 import { NotificationProvider } from '../../notification/notification.service';
 import { decryptNotificationProviderConfig } from '../../common/notification-provider-crypto';
+import { DB_PROVIDER_TOKEN } from '../../db/db.constants';
 
-// Define a token for the Drizzle provider
-export const DB_PROVIDER_TOKEN = 'DB_DRIZZLE';
+// Re-export from canonical location for backward compatibility.
+// All new code should import directly from '../../db/db.constants'.
+export { DB_PROVIDER_TOKEN };
 
 @Injectable()
 export class DbService implements OnModuleInit {

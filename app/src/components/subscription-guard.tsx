@@ -22,29 +22,44 @@ const ALLOWED_ROUTES_WITHOUT_SUBSCRIPTION = [
   '/org-admin',      // Org admin (has its own subscription tab logic)
 ];
 
+export interface SubscriptionStatus {
+  isActive: boolean;
+  plan: string | null;
+}
+
 interface SubscriptionGuardProps {
   children: React.ReactNode;
+  /** Server-provided subscription status to avoid client-side loading overlay */
+  initialSubscriptionStatus?: SubscriptionStatus | null;
+  /** Server-provided self-hosted flag to avoid waiting for app config fetch */
+  initialIsSelfHosted?: boolean;
 }
 
 // Query key for subscription status (exported for cache invalidation)
 export const SUBSCRIPTION_STATUS_QUERY_KEY = ["subscription-status"] as const;
 
-// Fetch subscription status (exported for prefetching)
-export async function fetchSubscriptionStatus(): Promise<{ isActive: boolean; plan: string | null }> {
-  const response = await fetch('/api/billing/current');
+// Fetch subscription status from lightweight endpoint (exported for prefetching)
+export async function fetchSubscriptionStatus(): Promise<SubscriptionStatus> {
+  const response = await fetch('/api/subscription/status');
   if (!response.ok) {
     throw new Error('Failed to fetch subscription status');
   }
-  const data = await response.json();
-  const isActive = data.subscription?.status === 'active' && data.subscription?.plan;
-  return {
-    isActive: !!isActive,
-    plan: data.subscription?.plan || null,
-  };
+  return response.json();
 }
 
 /**
  * SubscriptionGuard - Client component that checks subscription status
+ * 
+ * PERFORMANCE:
+ * Accepts optional `initialSubscriptionStatus` and `initialIsSelfHosted` from the
+ * server layout to eliminate the loading overlay on initial page load. The server
+ * layout already fetches org data (which includes subscription fields) and knows the
+ * hosting mode from env vars. Passing these avoids two client-side API calls
+ * (/api/config/app + /api/subscription/status) on the critical render path.
+ * 
+ * The client-side React Query still revalidates in the background for cloud routes
+ * on mount, so the guard does not stay pinned to the server snapshot for the whole
+ * session. Self-hosted mode skips the subscription query entirely.
  * 
  * HYDRATION SAFETY:
  * Always renders {children} to preserve the React tree shape across server and
@@ -59,33 +74,51 @@ export async function fetchSubscriptionStatus(): Promise<{ isActive: boolean; pl
  * In self-hosted mode:
  * - Always allows access (no subscription required)
  */
-export function SubscriptionGuard({ children }: SubscriptionGuardProps) {
+export function SubscriptionGuard({
+  children,
+  initialSubscriptionStatus,
+  initialIsSelfHosted,
+}: SubscriptionGuardProps) {
   const router = useRouter();
   const pathname = usePathname();
   const hydrated = useHydrated();
 
-  const { isSelfHosted, isFetched: isConfigFetched } = useAppConfig();
+  const { isSelfHosted: configSelfHosted, isFetched: isConfigFetched } = useAppConfig();
+
+  // Use server-provided value immediately; fall back to client-fetched config when available
+  const isSelfHosted = initialIsSelfHosted ?? configSelfHosted;
+  const hasSelfHostedInfo = initialIsSelfHosted !== undefined || isConfigFetched;
 
   // Check if current route is allowed without subscription
   const isAllowedRoute = ALLOWED_ROUTES_WITHOUT_SUBSCRIPTION.some(
     route => pathname.startsWith(route)
   );
 
-  // DataPrefetcher may have already populated this cache
+  // Subscription access is dynamic in cloud mode, so this query must override
+  // the global 30-minute staleTime/refetchOnMount defaults. Seed with server
+  // data for instant paint, then always revalidate once on mount. In known
+  // self-hosted mode we can skip the query entirely.
+  const shouldQuerySubscriptionStatus =
+    !isAllowedRoute && (!hasSelfHostedInfo || !isSelfHosted);
+
+  // Use server-provided initialData to skip loading overlay on first render,
+  // then immediately revalidate in the background for cloud routes.
   const { data: subscriptionStatus, isFetched, isError } = useQuery({
     queryKey: SUBSCRIPTION_STATUS_QUERY_KEY,
     queryFn: fetchSubscriptionStatus,
-    refetchOnMount: false,
+    initialData: initialSubscriptionStatus ?? undefined,
+    staleTime: 0,
+    refetchOnMount: "always",
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    enabled: !isAllowedRoute,
+    enabled: shouldQuerySubscriptionStatus,
     retry: 2,
   });
 
   // Handle redirect for users without subscription
   useEffect(() => {
     if (isAllowedRoute) return;
-    if (!isConfigFetched) return;
+    if (!hasSelfHostedInfo) return;
     if (isSelfHosted) return;
     if (!isFetched) return;
 
@@ -97,14 +130,14 @@ export function SubscriptionGuard({ children }: SubscriptionGuardProps) {
     if (subscriptionStatus && !subscriptionStatus.isActive) {
       router.push('/subscribe?required=true');
     }
-  }, [isConfigFetched, isSelfHosted, isAllowedRoute, isFetched, isError, subscriptionStatus, router]);
+  }, [hasSelfHostedInfo, isSelfHosted, isAllowedRoute, isFetched, isError, subscriptionStatus, router]);
 
   // Determine if we need to show a loading overlay (only after hydration)
   const needsOverlay = hydrated && !isAllowedRoute && !isSelfHosted && (
-    !isConfigFetched || (!isFetched && !subscriptionStatus?.isActive)
+    !hasSelfHostedInfo || (!isFetched && !subscriptionStatus?.isActive)
   );
 
-  const loadingMessage = !isConfigFetched ? "Loading configuration..." : "Checking access...";
+  const loadingMessage = !hasSelfHostedInfo ? "Loading configuration..." : "Checking access...";
 
   // Always render children to prevent hydration mismatch.
   // Show a full-screen overlay when loading in cloud mode.

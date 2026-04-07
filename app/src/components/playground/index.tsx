@@ -52,6 +52,7 @@ import {
   PerformanceLocation,
 } from "./location-selection-dialog";
 import { TemplateDialog } from "./template-dialog";
+import { useAvailableLocations } from "@/hooks/use-locations";
 import type { TestPriority, TestType } from "@/db/schema/types";
 import { notifyExecutionsChanged } from "@/hooks/use-executions";
 import { useSession } from "@/utils/auth-client";
@@ -156,8 +157,7 @@ const Playground: React.FC<PlaygroundProps> = ({
 
   const initialPerformanceLocation: PerformanceLocation | null =
     initialResolvedType === "performance" && initialTestData
-      ? ((initialTestData.location as PerformanceLocation) ??
-        ("global" as PerformanceLocation))
+      ? ((initialTestData.location as PerformanceLocation) ?? null)
       : null;
 
   // Suppress Monaco editor cancellation errors (harmless during component lifecycle)
@@ -193,6 +193,11 @@ const Playground: React.FC<PlaygroundProps> = ({
     useState<PerformanceLocation>(initialPerformanceLocation ?? "global");
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+
+  // Fetch dynamic locations to determine if location dialog should be shown
+  const { locations: dynamicLocations, hasRestrictions, isLoading: locationsLoading } = useAvailableLocations();
+  const hasMultipleLocations = dynamicLocations.length > 1;
+  const defaultAvailableLocation = dynamicLocations[0]?.code;
   // Only set testId from initialTestId if we're on a specific test page
   // Always ensure testId is null when on the main playground page
   const [testId, setTestId] = useState<string | null>(initialTestId || null);
@@ -535,12 +540,14 @@ const Playground: React.FC<PlaygroundProps> = ({
         type: typeToSet,
         location:
           typeToSet === "performance"
-            ? (performanceLocation ?? prev.location ?? "global")
+            ? (performanceLocation ?? prev.location ?? defaultAvailableLocation ?? "global")
             : null,
+        // Note: "global" is a safe static fallback before locations load;
+        // the sync effect will replace it with the DB default once available.
       }));
 
       if (typeToSet === "performance" && !performanceLocation) {
-        setPerformanceLocation("global");
+        setPerformanceLocation(defaultAvailableLocation ?? "global");
       }
 
       // Load sample script when:
@@ -568,7 +575,14 @@ const Playground: React.FC<PlaygroundProps> = ({
       };
       loadScriptForType();
     }
-  }, [searchParams, initialTestId, performanceLocation, testCase.type]);
+  }, [
+    searchParams,
+    initialTestId,
+    performanceLocation,
+    testCase.type,
+    defaultAvailableLocation,
+    hasRestrictions,
+  ]);
 
   // Handle initialTestData when provided from server-side
   useEffect(() => {
@@ -586,13 +600,21 @@ const Playground: React.FC<PlaygroundProps> = ({
         createdAt: initialTestData.createdAt || undefined,
         location:
           resolvedType === "performance"
-            ? ((initialTestData.location as PerformanceLocation) ?? "global")
+            ? ((initialTestData.location as PerformanceLocation) ??
+              (hasRestrictions ? (defaultAvailableLocation ?? "global") : "global"))
             : null,
       });
 
       if (resolvedType === "performance") {
+        // Saved tests don't persist location (TestForm.handleSubmit strips it),
+        // so initialTestData.location is typically null for reopened tests.
+        // - Restricted projects: resolve to their first available location
+        //   ("global" is invalid — it doesn't map to an allowed queue).
+        // - Unrestricted projects: keep "global" (k6-global, any-worker routing)
+        //   to preserve the broadest execution behavior.
         const resolvedLocation: PerformanceLocation =
-          (initialTestData.location as PerformanceLocation) ?? "global";
+          (initialTestData.location as PerformanceLocation) ??
+          (hasRestrictions ? (defaultAvailableLocation ?? "global") : "global");
         setPerformanceLocation(resolvedLocation);
         setTestCase((prev) => ({
           ...prev,
@@ -600,7 +622,25 @@ const Playground: React.FC<PlaygroundProps> = ({
         }));
       }
     }
-  }, [initialTestData]);
+  }, [defaultAvailableLocation, hasRestrictions, initialTestData]);
+
+  useEffect(() => {
+    if (!defaultAvailableLocation || !hasRestrictions) {
+      return;
+    }
+
+    // For restricted projects, "global" is not a valid queue target.
+    // Replace it with the project's first available location.
+    // Unrestricted projects keep "global" untouched — it maps to k6-global
+    // (any-worker routing) and may have been explicitly chosen by the user.
+    if (performanceLocation === "global") {
+      setPerformanceLocation(defaultAvailableLocation);
+      setTestCase((prev) => ({
+        ...prev,
+        location: defaultAvailableLocation,
+      }));
+    }
+  }, [defaultAvailableLocation, hasRestrictions, performanceLocation]);
 
   // Force Monaco editor to initialize on client side even with script params
   useEffect(() => {
@@ -818,6 +858,7 @@ const Playground: React.FC<PlaygroundProps> = ({
           const fallbackLocation =
             (result.location as PerformanceLocation) ||
             options?.location ||
+            defaultAvailableLocation ||
             ("global" as PerformanceLocation);
           setPerformanceLocation(fallbackLocation);
           setTestCase((prev) => ({
@@ -1069,7 +1110,25 @@ const Playground: React.FC<PlaygroundProps> = ({
     }
 
     if (isPerformanceMode) {
-      setLocationDialogOpen(true);
+      // Wait for location data to load before deciding whether to show
+      // the picker or auto-select. On cold page load, locations=[] and
+      // hasRestrictions=false, which would incorrectly bypass the dialog
+      // and route to "global" even for restricted projects.
+      if (locationsLoading) {
+        toast.info("Loading locations…", {
+          description: "Please wait a moment and try again.",
+          duration: 2000,
+        });
+        return;
+      }
+      if (hasMultipleLocations) {
+        setLocationDialogOpen(true);
+        return;
+      }
+      // Single location (or none): use the available location directly.
+      // "global" is only meaningful when multiple locations exist and user explicitly picks it.
+      const singleLocation = defaultAvailableLocation ?? "global";
+      await handleLocationSelect(singleLocation);
       return;
     }
 

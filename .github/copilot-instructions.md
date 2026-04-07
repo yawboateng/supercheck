@@ -39,8 +39,8 @@ npm run generate-docs
 - Execution flow is: UI/API request -> App API route creates/updates DB run rows -> App enqueues BullMQ jobs in Redis -> Worker processors execute and update statuses/artifacts -> results are stored in Postgres + S3/MinIO.
 - Queue topology is intentionally mixed:
   - Playwright: single global queue (`playwright-global`)
-  - k6: global queue (`k6-global`) plus regional queues (`k6-us-east`, `k6-eu-central`, `k6-asia-pacific`)
-  - Monitor: regional-only queues (`monitor-us-east`, `monitor-eu-central`, `monitor-asia-pacific`)
+  - k6: global queue (`k6-global`) plus per-location queues (e.g., `k6-local`, `k6-us-east`) — dynamically created from `locations` DB table
+  - Monitor: per-location queues only (e.g., `monitor-local`, `monitor-us-east`) — dynamically created from `locations` DB table
 - Worker location routing is controlled by `WORKER_LOCATION` in `/worker/src/k6/k6.module.ts` and `/worker/src/monitor/monitor.module.ts`.
 - Scheduling now runs in the App side (see worker `AppModule` comment: scheduler module removed from worker).
 
@@ -65,16 +65,24 @@ npm run generate-docs
 - `/app/src/lib/rbac/permissions.ts` integrates Better Auth (`createAccessControl`) and is server-only.
 
 ### Queue constants must stay aligned
-- Keep queue names synchronized between:
+- Queue names are dynamically generated from the `locations` database table (format: `k6-{code}`, `monitor-{code}`).
+- **Use the queue name builder functions** from `/app/src/lib/queue.ts` instead of inline template strings:
+  - `PLAYWRIGHT_QUEUE` (`"playwright-global"`)
+  - `K6_GLOBAL_QUEUE` (`"k6-global"`)
+  - `k6QueueName(locationCode)` → `"k6-{code}"`
+  - `monitorQueueName(locationCode)` → `"monitor-{code}"`
+- The fixed queue names (scheduler queues) must stay synchronized between:
   - `/app/src/lib/queue.ts`
   - `/worker/src/execution/constants.ts`
   - `/worker/src/k6/k6.constants.ts`
   - `/worker/src/monitor/monitor.constants.ts`
 - Do not rename queue constants in one place only.
+- After any location CRUD, call `invalidateLocationCache()`, `invalidateQueueMaps()`, `invalidateQueueEventHub()`, and `invalidateBullBoard()` (from `@/lib/bull-board/state`).
 
 ### Execution and scaling behavior
 - Per-process concurrency is intentionally low/hardcoded (`@Processor(..., { concurrency: 1 })`, plus `MAX_CONCURRENT_EXECUTIONS: 1` in worker memory constants); scale by running more worker replicas.
 - `SELF_HOSTED === "true"` gates behavior in AI/security flows (`/app/src/lib/ai/*`).
+- **Docker vs local dev paths**: `ContainerExecutorService` exposes `resolveWorkerDir()` (`/worker` in Docker, `process.cwd()` locally) and `resolveBrowsersPath()` (`/ms-playwright` in Docker, `undefined` locally). Use these instead of hardcoding Docker paths.
 
 ### E2E auth convention
 - E2E tests use `loginIfNeeded()` in each test file's `beforeEach` (see `/app/e2e/playwright.config.ts` and `/app/e2e/tests/**`); no shared Playwright storage-state auth file.

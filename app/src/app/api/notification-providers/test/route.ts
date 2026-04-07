@@ -94,13 +94,13 @@ async function testEmailConnection(config: NotificationProviderConfig) {
       }
     }
 
-    // Test SMTP connection
-    const smtpResult = await testSMTPConnection(emailList[0]);
+    // Test SMTP connection — send to ALL configured addresses so users can verify
+    const smtpResult = await testSMTPConnection(emailList);
 
     if (smtpResult.success) {
       return NextResponse.json({
         success: true,
-        message: `Email connection successful via SMTP. Test email sent to ${emailList[0]}.`,
+        message: smtpResult.message || `Email connection successful via SMTP. Test email sent to ${emailList.length} recipient(s).`,
         details: smtpResult,
       });
     } else {
@@ -125,10 +125,9 @@ async function testEmailConnection(config: NotificationProviderConfig) {
 }
 
 async function testSMTPConnection(
-  testEmail: string
+  testEmails: string[]
 ): Promise<{ success: boolean; message: string; error: string }> {
   try {
-    // Use centralized EmailService
     const emailService = EmailService.getInstance();
 
     // Render email using react-email template
@@ -137,17 +136,38 @@ async function testSMTPConnection(
         "This is a test email to verify your SMTP configuration is working correctly.",
     });
 
-    const result = await emailService.sendEmail({
-      to: testEmail,
+    // Send sequentially via a single SMTP connection so all recipients are
+    // reached even on servers that rate-limit concurrent connections
+    const result = await emailService.sendEmailToMultiple({
+      recipients: testEmails,
       subject: emailContent.subject,
       text: emailContent.text,
       html: emailContent.html,
     });
 
+    // All failed — SMTP config is likely wrong
+    if (result.sentCount === 0) {
+      const firstError = Object.values(result.errors)[0] ?? "Send failed";
+      return {
+        success: false,
+        message: "",
+        error: `Failed to send to all ${testEmails.length} recipient(s): ${firstError}`,
+      };
+    }
+
+    // Some succeeded, some failed — SMTP works but individual addresses may be bad
+    if (result.failedAddresses.length > 0) {
+      return {
+        success: true,
+        message: `SMTP connection verified. Sent to ${result.sentCount}/${testEmails.length} recipient(s). Failed for: ${result.failedAddresses.join(", ")}`,
+        error: "",
+      };
+    }
+
     return {
-      success: result.success,
-      message: result.message,
-      error: result.error || "",
+      success: true,
+      message: `Test email sent to ${testEmails.length} recipient(s)`,
+      error: "",
     };
   } catch (error) {
     return {

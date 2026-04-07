@@ -271,30 +271,3 @@ export default function() {
   sleep(1);
 }`;
 }
-
-/**
- * Location metadata for k6 execution
- * Uses kebab-case for internal representation
- */
-export const K6_LOCATIONS = {
-  US_EAST: {
-    code: 'us-east' as const,
-    name: 'US East',
-    region: 'Ashburn',
-    flag: '🇺🇸',
-  },
-  EU_CENTRAL: {
-    code: 'eu-central' as const,
-    name: 'EU Central',
-    region: 'Nuremberg',
-    flag: '🇩🇪',
-  },
-  ASIA_PACIFIC: {
-    code: 'asia-pacific' as const,
-    name: 'Asia Pacific',
-    region: 'Singapore',
-    flag: '🇸🇬',
-  },
-} as const;
-
-export type K6LocationCode = keyof typeof K6_LOCATIONS;

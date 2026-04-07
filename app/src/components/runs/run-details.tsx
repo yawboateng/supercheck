@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { runStatuses, triggerTypes } from "./data";
 import { toast } from "sonner";
 import { ReportViewer } from "@/components/shared/report-viewer";
@@ -42,6 +42,7 @@ import { Home } from "lucide-react";
 import { PerformanceTestReport } from "@/components/playground/performance-test-report";
 import type { K6RunStatus } from "@/lib/k6-runs";
 import { AIJobAnalyzeButton } from "./ai-job-analyze-button";
+import { useLocations } from "@/hooks/use-locations";
 
 
 // Type based on the actual API response from /api/runs/[runId]
@@ -85,27 +86,37 @@ export function RunDetails({
     run.location ?? null
   );
 
-  // Helper function to format location display with flag and name
-  // Using same flags as rest of the app (from location-service.ts)
+  // Fetch dynamic location data for display
+  const { locations: dynamicLocations } = useLocations();
+
+  // Build a lookup from dynamic data
+  const locationLookup = useMemo(() => {
+    const map: Record<string, { flag: string; name: string }> = {};
+    for (const loc of dynamicLocations) {
+      map[loc.code] = { flag: loc.flag || "📍", name: loc.name };
+    }
+    return map;
+  }, [dynamicLocations]);
+
+  // Helper function to format location display with flag and name.
+  // "global" means "any available worker" (legacy or explicit selection).
+  // null/undefined means location was not tracked (e.g. Playwright tests).
   const formatLocationDisplay = (
     location: string | null
   ): { flag: string; name: string } => {
-    if (
-      !location ||
-      location.toLowerCase() === "local" ||
-      location.toLowerCase() === "global"
-    ) {
+    if (!location) {
       return { flag: "🌍", name: "Global" };
     }
 
-    // Map location codes to display names with flags matching rest of app
-    const locationMap: Record<string, { flag: string; name: string }> = {
-      "us-east": { flag: "🇺🇸", name: "US East" },
-      "eu-central": { flag: "🇩🇪", name: "EU Central" },
-      "asia-pacific": { flag: "🇮🇳", name: "Asia Pacific" },
-    };
+    const lower = location.toLowerCase();
+    if (lower === "global") {
+      return { flag: "🌍", name: "Global" };
+    }
+    if (lower === "local") {
+      return { flag: "🏠", name: "Local" };
+    }
 
-    return locationMap[location] || { flag: "🌍", name: "Global" };
+    return locationLookup[location] || { flag: "📍", name: location };
   };
 
   // Helper to validate status is one of the allowed values

@@ -107,7 +107,7 @@ export async function deleteScheduledMonitor(schedulerId: string): Promise<boole
  */
 export async function initializeMonitorSchedulers(): Promise<{ success: boolean; scheduled: number; failed: number }> {
   const maxRetries = 3;
-  const retryDelay = 2000; // 2 seconds
+  const baseRetryDelay = 2000; // 2 seconds, doubles each attempt
   const LOCK_KEY = 'monitor:scheduler:init:lock';
   const LOCK_TTL_SECONDS = 120; // 2 minutes - enough time to initialize all schedulers
   
@@ -153,6 +153,7 @@ export async function initializeMonitorSchedulers(): Promise<{ success: boolean;
             
             const jobDataPayload: MonitorJobData = {
               monitorId: monitor.id,
+              projectId: monitor.projectId ?? undefined,
               type: monitor.type as MonitorJobData['type'],
               target: monitor.target,
               config: monitor.config as MonitorConfig,
@@ -194,8 +195,8 @@ export async function initializeMonitorSchedulers(): Promise<{ success: boolean;
         return { success: false, scheduled: 0, failed: 0 };
       }
 
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      // Wait before retrying with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, baseRetryDelay * Math.pow(2, attempt - 1)));
     }
   }
   

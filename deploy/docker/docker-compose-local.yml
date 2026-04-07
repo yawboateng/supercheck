@@ -5,17 +5,19 @@
 #
 # Quick Start:
 #   1. Clone the repository
-#   2. Run: docker compose -f docker-compose-local.yml up -d --build
-#   3. Access: http://localhost:3000
+#   2. Run: sudo bash setup-k3s.sh
+#   3. Run: KUBECONFIG_FILE=/etc/rancher/k3s/supercheck-worker.kubeconfig docker compose -f docker-compose-local.yml up -d --build
+#   4. Access: http://localhost:3000
 #
 # Features:
 #   - Builds app and worker from local source (../../app, ../../worker)
 #   - Source code mounted for hot-reload
 #   - All services included: PostgreSQL, Redis, MinIO
 #
-# For production deployment, use docker-compose-secure.yml instead.
+# This file builds from source for local iteration, but uses the same K3s +
+# gVisor execution model as the production Compose variants.
 #
-# Documentation: https://supercheck.io/docs/deployment/self-hosted
+# Documentation: https://supercheck.io/docs/app/deployment/self-hosted
 # ============================================================================
 
 # Project name ensures consistent volume naming across different directories
@@ -281,9 +283,9 @@ services:
           cpus: "0.5"
           memory: 1G
 
-  # Worker (NestJS Runner) - Container-based test execution
-  # Tests run in isolated Docker containers (Playwright/K6), not inside worker
-  # Playwright Docker best practices: https://playwright.dev/docs/docker
+  # Worker (NestJS Runner)
+  # Source-based local iteration using the same per-run Kubernetes Job model
+  # as the production Compose variants.
   worker:
     build:
       context: ../../worker
@@ -291,19 +293,29 @@ services:
     image: supercheck-worker:latest
     # init: Use tini as PID 1 to avoid zombie processes (Playwright recommendation)
     init: true
+    # GVISOR-006: Run as non-root user (pwuser UID 1000 from Playwright image)
+    user: "1000:1000"
+    # GVISOR-006: Read-only root filesystem with writable tmpfs mounts
+    read_only: true
     environment:
       <<: *common-env
       WORKER_IMAGE: supercheck-worker:latest
+      EXECUTION_NAMESPACE: ${EXECUTION_NAMESPACE:-supercheck-execution}
+      KUBECONFIG: /run/secrets/supercheck-kubeconfig
       # Note: MAX_CONCURRENT_EXECUTIONS=1 is hardcoded in worker code (scale via replicas)
+    tmpfs:
+      - /tmp:size=2G,uid=1000,gid=1000,mode=1777
+      - /home/pwuser/.cache:size=256M,uid=1000,gid=1000,mode=0700
+      - /home/pwuser/.npm:size=256M,uid=1000,gid=1000,mode=0700
     volumes:
-      # Mount Docker socket for container-based execution
-      # Worker spawns isolated containers for Playwright and K6 tests
-      - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only for security
       - worker-playwright-reports:/worker/playwright-reports
       - worker-k6-reports:/worker/k6-reports
       - worker-reports:/worker/report
+      - ${KUBECONFIG_FILE:-/etc/rancher/k3s/supercheck-worker.kubeconfig}:/run/secrets/supercheck-kubeconfig:ro
       # Development: Mount source for hot reload (remove in production)
       - ../../worker/src:/worker/src:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -330,17 +342,15 @@ services:
         limits:
           cpus: "1.8"
           memory: 3G
+          pids: 512
         reservations:
           cpus: "0.5"
           memory: 1G
-    # Security constraints - maintain production security locally
+    # GVISOR-006: Hardened security profile
     security_opt:
       - no-new-privileges:true # Prevent privilege escalation
     cap_drop:
       - ALL # Drop all capabilities by default
-    # Note: SYS_ADMIN capability removed - not needed for container execution
-    # Browsers run in separate containers with their own capabilities
-
   # PostgreSQL Database
   postgres:
     image: postgres:18

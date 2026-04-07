@@ -187,7 +187,7 @@ export async function deleteScheduledJob(
  */
 export async function initializeJobSchedulers() {
   const maxRetries = 3;
-  const retryDelay = 2000; // 2 seconds
+  const baseRetryDelay = 2000; // 2 seconds, doubles each attempt
   const LOCK_KEY = 'job:scheduler:init:lock';
   const LOCK_TTL_SECONDS = 120; // 2 minutes - enough time to initialize all schedulers
 
@@ -315,8 +315,8 @@ export async function initializeJobSchedulers() {
         return { success: false, initialized: 0, failed: 0, error };
       }
 
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
+      // Wait before retrying with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, baseRetryDelay * Math.pow(2, attempt - 1)));
     }
   }
 
