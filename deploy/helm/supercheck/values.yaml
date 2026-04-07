@@ -87,9 +87,9 @@ execution:
   namespace: supercheck-execution
   # -- Create the execution namespace and its security resources
   createNamespace: true
-  # -- Kubernetes RuntimeClass for execution pods (e.g., "gvisor" for sandbox isolation)
-  # Set to "" or "runc" if gVisor is not installed on your cluster
-  runtimeClassName: gvisor
+  # -- Kubernetes RuntimeClass for execution pods
+  # Defaults to "" (cluster default, typically runc). Set to "gvisor" for sandbox isolation.
+  runtimeClassName: ""
   # -- Node selector for execution pods (key=value pairs)
   # Example: "tier=execution,pool=sandbox"
   nodeSelector: ""

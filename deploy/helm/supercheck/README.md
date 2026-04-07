@@ -269,7 +269,7 @@ helm install supercheck ./deploy/helm/supercheck -f my-values.yaml
 |---|---|---|
 | `execution.namespace` | Namespace for test execution Jobs | `supercheck-execution` |
 | `execution.createNamespace` | Create the namespace + security resources | `true` |
-| `execution.runtimeClassName` | RuntimeClass for execution pods (`gvisor`, `runc`, `""`) | `gvisor` |
+| `execution.runtimeClassName` | RuntimeClass for execution pods (`""`, `gvisor`) | `""` (cluster default) |
 | `execution.nodeSelector` | Node selector for execution pods (key=value) | `""` |
 | `execution.tolerationsJson` | Tolerations for execution pods (JSON) | `""` |
 | `execution.dnsNameservers` | Custom DNS nameservers (comma-separated IPs) | `""` |
@@ -507,11 +507,11 @@ scheduling:
     gvisor.io/enabled: "true"
 ```
 
-If gVisor is not available, set `execution.runtimeClassName` to `""` or `runc`:
+Then enable it in your values:
 
 ```bash
 helm install supercheck ./deploy/helm/supercheck \
-  --set execution.runtimeClassName=""
+  --set execution.runtimeClassName=gvisor
 ```
 
 ## Notes
