@@ -1,0 +1,93 @@
+{{- if and .Values.ingress.enabled (eq .Values.ingress.provider "traefik") .Values.app.enabled }}
+# HTTP -> HTTPS redirect (when TLS is enabled)
+{{- if .Values.ingress.tls.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "supercheck.fullname" . }}-app-http
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - web
+  routes:
+    # App redirect
+    - match: Host(`{{ .Values.ingress.hosts.app }}`)
+      kind: Rule
+      middlewares:
+        - name: {{ include "supercheck.fullname" . }}-https-redirect
+      services:
+        - name: {{ include "supercheck.fullname" . }}-app
+          port: {{ .Values.app.service.port }}
+    # Status pages redirect
+    - match: HostRegexp(`[a-zA-Z0-9-]+\.{{ .Values.config.statusPageDomain }}`)
+      kind: Rule
+      middlewares:
+        - name: {{ include "supercheck.fullname" . }}-https-redirect
+      services:
+        - name: {{ include "supercheck.fullname" . }}-app
+          port: {{ .Values.app.service.port }}
+---
+{{- end }}
+# Main app IngressRoute
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "supercheck.fullname" . }}-app
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+  {{- if .Values.ingress.traefik.certManagerIssuer }}
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.traefik.certManagerIssuer | quote }}
+  {{- end }}
+spec:
+  entryPoints:
+    {{- if .Values.ingress.tls.enabled }}
+    - websecure
+    {{- else }}
+    {{- toYaml .Values.ingress.traefik.entryPoints | nindent 4 }}
+    {{- end }}
+  routes:
+    - match: Host(`{{ .Values.ingress.hosts.app }}`)
+      kind: Rule
+      services:
+        - name: {{ include "supercheck.fullname" . }}-app
+          port: {{ .Values.app.service.port }}
+          passHostHeader: true
+      middlewares: []
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    {{- if .Values.ingress.traefik.certManagerIssuer }}
+    secretName: {{ .Values.ingress.tls.secretName }}
+    {{- else }}
+    secretName: {{ .Values.ingress.tls.secretName }}
+    {{- end }}
+  {{- end }}
+---
+# Status pages IngressRoute (wildcard subdomain)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ include "supercheck.fullname" . }}-status-pages
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    {{- if .Values.ingress.tls.enabled }}
+    - websecure
+    {{- else }}
+    {{- toYaml .Values.ingress.traefik.entryPoints | nindent 4 }}
+    {{- end }}
+  routes:
+    - match: HostRegexp(`[a-zA-Z0-9-]+\.{{ .Values.config.statusPageDomain }}`)
+      kind: Rule
+      priority: 50
+      services:
+        - name: {{ include "supercheck.fullname" . }}-app
+          port: {{ .Values.app.service.port }}
+          passHostHeader: true
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}

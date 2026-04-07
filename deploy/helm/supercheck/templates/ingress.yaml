@@ -1,0 +1,51 @@
+{{- if and .Values.ingress.enabled (eq .Values.ingress.provider "ingress") .Values.app.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "supercheck.fullname" . }}-app
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.ingress.kubernetes.certManagerIssuer }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.kubernetes.certManagerIssuer | quote }}
+    {{- end }}
+    {{- with .Values.ingress.kubernetes.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.kubernetes.className }}
+  ingressClassName: {{ .Values.ingress.kubernetes.className | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.hosts.app | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+    - hosts:
+        - {{ .Values.ingress.hosts.statusPages | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}-status
+  {{- end }}
+  rules:
+    # Main app
+    - host: {{ .Values.ingress.hosts.app | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "supercheck.fullname" . }}-app
+                port:
+                  number: {{ .Values.app.service.port }}
+    # Status pages (wildcard) — requires ingress controller wildcard support
+    - host: {{ .Values.ingress.hosts.statusPages | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "supercheck.fullname" . }}-app
+                port:
+                  number: {{ .Values.app.service.port }}
+{{- end }}

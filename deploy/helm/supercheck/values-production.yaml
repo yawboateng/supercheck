@@ -1,0 +1,105 @@
+# Supercheck - Production with Ingress + TLS
+# Matches docker-compose-secure.yml
+#
+# Usage:
+#   helm install supercheck ./deploy/kubernetes/supercheck -f values-production.yaml
+#
+# This file defaults to Istio. To switch providers, change ingress.provider below.
+#
+# Istio prerequisites:
+#   - Istio installed with ingress gateway
+#   - TLS secret in istio-system namespace:
+#     kubectl create secret tls supercheck-tls --cert=cert.pem --key=key.pem -n istio-system
+#
+# Traefik prerequisites:
+#   - Traefik CRD-based ingress controller installed
+#   - TLS secret in release namespace, or cert-manager configured
+#
+# Kubernetes Ingress prerequisites:
+#   - An ingress controller installed (nginx-ingress, HAProxy, Contour, etc.)
+#   - TLS secret in release namespace, or cert-manager configured
+
+app:
+  replicas: 2
+  resources:
+    limits:
+      cpu: "1.5"
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+postgres:
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1.5Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+redis:
+  maxmemory: 512mb
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+ingress:
+  enabled: true
+  # -- Choose: "istio", "traefik", or "ingress"
+  provider: istio
+
+  hosts:
+    app: "app.yourdomain.com"          # CHANGE
+    statusPages: "*.yourdomain.com"    # CHANGE
+
+  tls:
+    enabled: true
+    secretName: supercheck-tls
+
+  # Istio-specific (used when provider=istio)
+  istio:
+    gatewaySelector:
+      istio: ingressgateway
+    tlsMode: SIMPLE
+    peerAuthentication:
+      enabled: true
+      mode: STRICT
+
+  # Traefik-specific (used when provider=traefik)
+  traefik:
+    entryPoints:
+      - web
+      - websecure
+    certManagerIssuer: ""  # e.g. "letsencrypt-prod"
+
+  # Kubernetes Ingress (used when provider=ingress)
+  kubernetes:
+    className: nginx
+    annotations: {}
+    certManagerIssuer: ""  # e.g. "letsencrypt-prod"
+
+config:
+  # CHANGE: Set to your domain
+  appUrl: "https://app.yourdomain.com"
+  appDomain: "app.yourdomain.com"
+  statusPageDomain: "yourdomain.com"
+
+  # CHANGE: Generate secure secrets
+  auth:
+    betterAuthSecret: ""   # openssl rand -hex 32
+    secretEncryptionKey: "" # openssl rand -hex 32
+
+  database:
+    password: ""  # CHANGE: set a strong password
+
+  redis:
+    password: ""  # CHANGE: set a strong password
+
+  s3:
+    accessKeyId: ""     # CHANGE
+    secretAccessKey: ""  # CHANGE

@@ -1,0 +1,408 @@
+# Supercheck Helm Chart - Default Values
+# Matches docker-compose.yml (development with all services)
+#
+# Usage:
+#   helm install supercheck ./deploy/kubernetes/supercheck
+#
+# For production:  helm install supercheck . -f values-production.yaml
+# For external:    helm install supercheck . -f values-external.yaml
+# For worker-only: helm install supercheck . -f values-worker.yaml
+
+# -- Override chart name
+nameOverride: ""
+# -- Override full name
+fullnameOverride: ""
+
+# -- Supercheck version (used for app and worker image tags)
+supercheckVersion: "1.3.0"
+
+# =============================================================================
+# Component Toggles
+# =============================================================================
+
+app:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ghcr.io/supercheck-io/supercheck/app
+    pullPolicy: IfNotPresent
+    # -- Overrides supercheckVersion
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 3000
+  resources:
+    limits:
+      cpu: "1"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  # -- Additional pod annotations
+  podAnnotations: {}
+  # -- Node selector
+  nodeSelector: {}
+  # -- Tolerations
+  tolerations: []
+  # -- Affinity rules
+  affinity: {}
+
+worker:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ghcr.io/supercheck-io/supercheck/worker
+    pullPolicy: IfNotPresent
+    # -- Overrides supercheckVersion
+    tag: ""
+  service:
+    port: 8000
+  resources:
+    limits:
+      cpu: "1.8"
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  # -- Mount host Docker socket for container-based test execution
+  mountDockerSocket: true
+  # -- Security context for the worker pod
+  securityContext:
+    allowPrivilegeEscalation: false
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "18"
+    pullPolicy: IfNotPresent
+  service:
+    port: 5432
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "8"
+    pullPolicy: IfNotPresent
+  service:
+    port: 6379
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  maxmemory: 256mb
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+minio:
+  enabled: true
+  image:
+    repository: minio/minio
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =============================================================================
+# Ingress Configuration
+# =============================================================================
+# Supercheck supports three ingress providers:
+#   - istio:    Istio Gateway + VirtualService (recommended for Istio service mesh)
+#   - traefik:  Traefik IngressRoute CRDs (native Traefik in Kubernetes)
+#   - ingress:  Standard Kubernetes Ingress resource (nginx-ingress, HAProxy, etc.)
+
+ingress:
+  enabled: false
+  # -- Ingress provider: "istio", "traefik", or "ingress"
+  provider: istio
+
+  # -- Hostnames
+  hosts:
+    app: "app.example.com"
+    # -- Wildcard for status pages (used by istio/traefik; ingress uses a separate rule)
+    statusPages: "*.example.com"
+
+  # -- TLS configuration (shared across providers)
+  tls:
+    enabled: false
+    # -- Secret name containing TLS cert/key
+    # For Istio: must be in istio-system namespace
+    # For Traefik/Ingress: must be in the release namespace
+    secretName: supercheck-tls
+
+  # ---------------------------------------------------------------------------
+  # Istio-specific settings (only used when provider=istio)
+  # ---------------------------------------------------------------------------
+  istio:
+    # -- Istio ingress gateway selector labels
+    gatewaySelector:
+      istio: ingressgateway
+    # -- TLS mode: SIMPLE, MUTUAL, or ISTIO_MUTUAL
+    tlsMode: SIMPLE
+    # -- Enable strict mTLS between services via PeerAuthentication
+    peerAuthentication:
+      enabled: false
+      mode: STRICT
+
+  # ---------------------------------------------------------------------------
+  # Traefik-specific settings (only used when provider=traefik)
+  # ---------------------------------------------------------------------------
+  traefik:
+    # -- Traefik entrypoints
+    entryPoints:
+      - web
+      - websecure
+    # -- cert-manager ClusterIssuer name for automatic TLS (optional)
+    # If set, Traefik will use cert-manager to provision certificates via
+    # the tls.certResolver annotation. Leave empty to use a manual TLS secret.
+    certManagerIssuer: ""
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes Ingress settings (only used when provider=ingress)
+  # ---------------------------------------------------------------------------
+  kubernetes:
+    # -- Ingress class name (e.g., "nginx", "haproxy", "contour")
+    className: nginx
+    # -- Additional annotations for the Ingress resource
+    annotations: {}
+    # -- cert-manager ClusterIssuer name for automatic TLS (optional)
+    certManagerIssuer: ""
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+config:
+  # -- App URL (without trailing slash)
+  appUrl: "http://localhost:3000"
+  # -- App domain (used for Istio routing)
+  appDomain: "demo.supercheck.dev"
+  # -- Status page domain for wildcard subdomain routing
+  statusPageDomain: "supercheck.dev"
+  # -- Hide status page branding footer
+  statusPageHideBranding: false
+  # -- Node environment
+  nodeEnv: production
+  # -- Show community links
+  showCommunityLinks: true
+  # -- Self-hosted mode (unlimited features)
+  selfHosted: true
+
+  # -- Registration controls
+  signup:
+    enabled: true
+    allowedEmailDomains: ""
+
+  # -- Database configuration
+  database:
+    # -- Full DATABASE_URL (overrides host/port/user/password/name if set)
+    url: ""
+    host: supercheck-postgres
+    port: 5432
+    user: postgres
+    password: postgres
+    name: supercheck
+
+  # -- Redis configuration
+  redis:
+    # -- Full REDIS_URL (overrides host/port/password if set)
+    url: ""
+    host: supercheck-redis
+    port: 6379
+    password: "supersecure-redis-password-change-this"
+    tls:
+      enabled: false
+      rejectUnauthorized: false
+
+  # -- S3/MinIO configuration
+  s3:
+    endpoint: "http://supercheck-minio:9000"
+    region: us-east-1
+    accessKeyId: minioadmin
+    secretAccessKey: minioadmin
+    forcePathStyle: true
+    operationTimeout: 10000
+    maxRetries: 3
+    buckets:
+      test: playwright-test-artifacts
+      job: playwright-job-artifacts
+      monitor: playwright-monitor-artifacts
+      k6Test: k6-test-artifacts
+      k6Job: k6-job-artifacts
+      status: status-page-artifacts
+      requirements: test-requirement-artifacts
+
+  # -- Auth secrets (CHANGE THESE)
+  auth:
+    betterAuthSecret: "CHANGE_THIS_GENERATE_32_CHAR_HEX"
+    secretEncryptionKey: "CHANGE_THIS_GENERATE_32_CHAR_HEX"
+
+  # -- Capacity settings
+  capacity:
+    running: 1
+    queued: 10
+    containerCpuLimit: "1.5"
+    containerMemoryLimitMb: 2048
+
+  # -- Execution timeouts (milliseconds)
+  timeouts:
+    testExecution: 300000
+    jobExecution: 3600000
+    k6TestExecution: 3600000
+    k6JobExecution: 3600000
+
+  # -- Worker location for geo-distributed deployments
+  # Valid: local, us-east, eu-central, asia-pacific
+  workerLocation: local
+
+  # -- Playwright configuration
+  playwright:
+    workers: 1
+    retries: 1
+    trace: retain-on-failure
+    screenshot: "on"
+    video: retain-on-failure
+
+  # -- Notification channel limits
+  notifications:
+    maxJobChannels: 10
+    maxMonitorChannels: 10
+
+  # -- Document upload limits
+  documents:
+    maxSizeMb: 10
+    maxPerProject: 100
+
+  # -- Projects
+  projects:
+    maxPerOrg: 10
+    defaultName: "Default Project"
+
+  # -- Cleanup jobs
+  cleanup:
+    monitor:
+      enabled: true
+      cron: "0 2 * * *"
+      batchSize: 1000
+      preserveStatusChanges: true
+      safetyLimit: 1000000
+    monitorAggregates:
+      enabled: true
+      cron: "30 2 * * *"
+      batchSize: 1000
+      safetyLimit: 500000
+    jobRuns:
+      enabled: true
+      cron: "0 3 * * *"
+      batchSize: 100
+      safetyLimit: 10000
+    playground:
+      enabled: true
+      cron: "0 5 * * *"
+      maxAgeHours: 24
+    webhook:
+      enabled: true
+      cron: "0 4 * * *"
+      batchSize: 1000
+      safetyLimit: 100000
+
+  # -- SMTP configuration (optional)
+  smtp:
+    host: ""
+    port: 587
+    user: ""
+    password: ""
+    secure: false
+    fromEmail: ""
+
+  # -- AI provider configuration (optional)
+  ai:
+    provider: openai
+    model: gpt-4o-mini
+    timeoutMs: 90000
+    maxRetries: 2
+    temperature: "0.1"
+
+  # -- AI provider API keys (set the one matching your provider)
+  aiKeys:
+    openai: ""
+    anthropic: ""
+    azureResourceName: ""
+    azureApiKey: ""
+    azureDeployment: ""
+    azureApiVersion: "2024-06-01"
+    azureUseManagedIdentity: false
+    googleGenerativeAi: ""
+    googleVertexProject: ""
+    googleVertexLocation: us-central1
+    bedrockRegion: ""
+    bedrockAccessKeyId: ""
+    bedrockSecretAccessKey: ""
+    bedrockSessionToken: ""
+    openrouter: ""
+
+  # -- OAuth configuration (optional)
+  oauth:
+    github:
+      clientId: ""
+      clientSecret: ""
+    google:
+      clientId: ""
+      clientSecret: ""
+
+  # -- Queue alerting (optional)
+  queueAlerting:
+    enabled: true
+    slackWebhookUrl: ""
+    webhookUrl: ""
+
+# -- Image pull secrets (for private registries)
+imagePullSecrets: []

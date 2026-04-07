@@ -1,0 +1,96 @@
+# Supercheck - Production with External Managed Services
+# Matches docker-compose-external.yml
+#
+# Usage:
+#   helm install supercheck ./deploy/kubernetes/supercheck -f values-external.yaml
+#
+# This disables Postgres, Redis, and MinIO pods.
+# Configure connection strings for your external managed services.
+
+# Disable in-cluster databases
+postgres:
+  enabled: false
+
+redis:
+  enabled: false
+
+minio:
+  enabled: false
+
+app:
+  replicas: 2
+  resources:
+    limits:
+      cpu: "1.5"
+      memory: 3Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+ingress:
+  enabled: true
+  # -- Choose: "istio", "traefik", or "ingress"
+  provider: istio
+
+  hosts:
+    app: "app.yourdomain.com"
+    statusPages: "*.yourdomain.com"
+
+  tls:
+    enabled: true
+    secretName: supercheck-tls
+
+  istio:
+    gatewaySelector:
+      istio: ingressgateway
+    tlsMode: SIMPLE
+    peerAuthentication:
+      enabled: true
+      mode: STRICT
+
+  traefik:
+    entryPoints:
+      - web
+      - websecure
+    certManagerIssuer: ""
+
+  kubernetes:
+    className: nginx
+    annotations: {}
+    certManagerIssuer: ""
+
+config:
+  appUrl: "https://app.yourdomain.com"
+  appDomain: "app.yourdomain.com"
+  statusPageDomain: "yourdomain.com"
+
+  auth:
+    betterAuthSecret: ""
+    secretEncryptionKey: ""
+
+  # CHANGE: External PostgreSQL (Neon, Supabase, AWS RDS, etc.)
+  database:
+    url: "postgresql://user:password@your-db-host:5432/supercheck"
+    host: "your-db-host"
+    port: 5432
+    user: ""
+    password: ""
+    name: supercheck
+
+  # CHANGE: External Redis (Upstash, Redis Cloud, AWS ElastiCache, etc.)
+  redis:
+    url: "redis://:password@your-redis-host:6379"
+    host: "your-redis-host"
+    port: 6379
+    password: ""
+    tls:
+      enabled: true              # Most cloud Redis providers require TLS
+      rejectUnauthorized: true
+
+  # CHANGE: External S3 (AWS S3, Cloudflare R2, etc.)
+  s3:
+    endpoint: "https://s3.us-east-1.amazonaws.com"
+    region: us-east-1
+    accessKeyId: ""
+    secretAccessKey: ""
+    forcePathStyle: true

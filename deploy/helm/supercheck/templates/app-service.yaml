@@ -1,0 +1,18 @@
+{{- if .Values.app.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "supercheck.fullname" . }}-app
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+    {{- include "supercheck.app.selectorLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.app.service.type }}
+  ports:
+    - port: {{ .Values.app.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "supercheck.app.selectorLabels" . | nindent 4 }}
+{{- end }}

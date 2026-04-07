@@ -1,0 +1,11 @@
+{{- if and .Values.ingress.enabled (eq .Values.ingress.provider "istio") .Values.ingress.istio.peerAuthentication.enabled }}
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "supercheck.fullname" . }}
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  mtls:
+    mode: {{ .Values.ingress.istio.peerAuthentication.mode }}
+{{- end }}

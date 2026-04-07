@@ -1,0 +1,104 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "supercheck.fullname" . }}-worker
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+    {{- include "supercheck.worker.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "supercheck.worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "supercheck.worker.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.app.enabled }}
+      initContainers:
+        - name: wait-for-app
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ include "supercheck.fullname" . }}-app {{ .Values.app.service.port }}; do echo waiting for app; sleep 5; done']
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Values.supercheckVersion }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "supercheck.fullname" . }}-config
+            - secretRef:
+                name: {{ include "supercheck.fullname" . }}-secret
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.worker.mountDockerSocket }}
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+            {{- end }}
+            - name: playwright-reports
+              mountPath: /worker/playwright-reports
+            - name: k6-reports
+              mountPath: /worker/k6-reports
+            - name: worker-reports
+              mountPath: /worker/report
+      volumes:
+        {{- if .Values.worker.mountDockerSocket }}
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+        {{- end }}
+        - name: playwright-reports
+          emptyDir: {}
+        - name: k6-reports
+          emptyDir: {}
+        - name: worker-reports
+          emptyDir: {}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

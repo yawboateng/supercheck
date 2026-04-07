@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "supercheck.fullname" . }}-config
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+data:
+  # App Configuration
+  NODE_ENV: {{ .Values.config.nodeEnv | quote }}
+  NEXT_PUBLIC_APP_URL: {{ .Values.config.appUrl | quote }}
+  APP_URL: {{ .Values.config.appUrl | quote }}
+  BETTER_AUTH_URL: {{ .Values.config.appUrl | quote }}
+  APP_DOMAIN: {{ .Values.config.appDomain | quote }}
+  STATUS_PAGE_DOMAIN: {{ .Values.config.statusPageDomain | quote }}
+  STATUS_PAGE_HIDE_BRANDING: {{ .Values.config.statusPageHideBranding | quote }}
+  SHOW_COMMUNITY_LINKS: {{ .Values.config.showCommunityLinks | quote }}
+  SELF_HOSTED: {{ .Values.config.selfHosted | quote }}
+
+  # Registration
+  SIGNUP_ENABLED: {{ .Values.config.signup.enabled | quote }}
+  ALLOWED_EMAIL_DOMAINS: {{ .Values.config.signup.allowedEmailDomains | quote }}
+
+  # Database (non-sensitive)
+  DB_HOST: {{ .Values.config.database.host | quote }}
+  DB_PORT: {{ .Values.config.database.port | quote }}
+  DB_USER: {{ .Values.config.database.user | quote }}
+  DB_NAME: {{ .Values.config.database.name | quote }}
+
+  # Redis (non-sensitive)
+  REDIS_HOST: {{ .Values.config.redis.host | quote }}
+  REDIS_PORT: {{ .Values.config.redis.port | quote }}
+  REDIS_TLS_ENABLED: {{ .Values.config.redis.tls.enabled | quote }}
+  REDIS_TLS_REJECT_UNAUTHORIZED: {{ .Values.config.redis.tls.rejectUnauthorized | quote }}
+
+  # S3 (non-sensitive)
+  S3_ENDPOINT: {{ .Values.config.s3.endpoint | quote }}
+  AWS_REGION: {{ .Values.config.s3.region | quote }}
+  S3_FORCE_PATH_STYLE: {{ .Values.config.s3.forcePathStyle | quote }}
+  S3_OPERATION_TIMEOUT: {{ .Values.config.s3.operationTimeout | quote }}
+  S3_MAX_RETRIES: {{ .Values.config.s3.maxRetries | quote }}
+  S3_TEST_BUCKET_NAME: {{ .Values.config.s3.buckets.test | quote }}
+  S3_JOB_BUCKET_NAME: {{ .Values.config.s3.buckets.job | quote }}
+  S3_MONITOR_BUCKET_NAME: {{ .Values.config.s3.buckets.monitor | quote }}
+  S3_K6_TEST_BUCKET_NAME: {{ .Values.config.s3.buckets.k6Test | quote }}
+  S3_K6_JOB_BUCKET_NAME: {{ .Values.config.s3.buckets.k6Job | quote }}
+  S3_STATUS_BUCKET_NAME: {{ .Values.config.s3.buckets.status | quote }}
+  S3_REQUIREMENTS_BUCKET_NAME: {{ .Values.config.s3.buckets.requirements | quote }}
+
+  # Capacity
+  RUNNING_CAPACITY: {{ .Values.config.capacity.running | quote }}
+  QUEUED_CAPACITY: {{ .Values.config.capacity.queued | quote }}
+  CONTAINER_CPU_LIMIT: {{ .Values.config.capacity.containerCpuLimit | quote }}
+  CONTAINER_MEMORY_LIMIT_MB: {{ .Values.config.capacity.containerMemoryLimitMb | quote }}
+
+  # Timeouts
+  TEST_EXECUTION_TIMEOUT_MS: {{ .Values.config.timeouts.testExecution | quote }}
+  JOB_EXECUTION_TIMEOUT_MS: {{ .Values.config.timeouts.jobExecution | quote }}
+  K6_TEST_EXECUTION_TIMEOUT_MS: {{ .Values.config.timeouts.k6TestExecution | quote }}
+  K6_JOB_EXECUTION_TIMEOUT_MS: {{ .Values.config.timeouts.k6JobExecution | quote }}
+
+  # Worker
+  WORKER_LOCATION: {{ .Values.config.workerLocation | quote }}
+  WORKER_IMAGE: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Values.supercheckVersion }}"
+
+  # Playwright
+  PLAYWRIGHT_WORKERS: {{ .Values.config.playwright.workers | quote }}
+  PLAYWRIGHT_RETRIES: {{ .Values.config.playwright.retries | quote }}
+  PLAYWRIGHT_TRACE: {{ .Values.config.playwright.trace | quote }}
+  PLAYWRIGHT_SCREENSHOT: {{ .Values.config.playwright.screenshot | quote }}
+  PLAYWRIGHT_VIDEO: {{ .Values.config.playwright.video | quote }}
+
+  # Notifications
+  MAX_JOB_NOTIFICATION_CHANNELS: {{ .Values.config.notifications.maxJobChannels | quote }}
+  MAX_MONITOR_NOTIFICATION_CHANNELS: {{ .Values.config.notifications.maxMonitorChannels | quote }}
+
+  # Documents
+  MAX_DOCUMENT_SIZE_MB: {{ .Values.config.documents.maxSizeMb | quote }}
+  MAX_DOCUMENTS_PER_PROJECT: {{ .Values.config.documents.maxPerProject | quote }}
+
+  # Projects
+  MAX_PROJECTS_PER_ORG: {{ .Values.config.projects.maxPerOrg | quote }}
+  DEFAULT_PROJECT_NAME: {{ .Values.config.projects.defaultName | quote }}
+
+  # Cleanup jobs
+  MONITOR_CLEANUP_ENABLED: {{ .Values.config.cleanup.monitor.enabled | quote }}
+  MONITOR_CLEANUP_CRON: {{ .Values.config.cleanup.monitor.cron | quote }}
+  MONITOR_CLEANUP_BATCH_SIZE: {{ .Values.config.cleanup.monitor.batchSize | quote }}
+  MONITOR_PRESERVE_STATUS_CHANGES: {{ .Values.config.cleanup.monitor.preserveStatusChanges | quote }}
+  MONITOR_CLEANUP_SAFETY_LIMIT: {{ .Values.config.cleanup.monitor.safetyLimit | quote }}
+  MONITOR_AGGREGATES_CLEANUP_ENABLED: {{ .Values.config.cleanup.monitorAggregates.enabled | quote }}
+  MONITOR_AGGREGATES_CLEANUP_CRON: {{ .Values.config.cleanup.monitorAggregates.cron | quote }}
+  MONITOR_AGGREGATES_CLEANUP_BATCH_SIZE: {{ .Values.config.cleanup.monitorAggregates.batchSize | quote }}
+  MONITOR_AGGREGATES_CLEANUP_SAFETY_LIMIT: {{ .Values.config.cleanup.monitorAggregates.safetyLimit | quote }}
+  JOB_RUNS_CLEANUP_ENABLED: {{ .Values.config.cleanup.jobRuns.enabled | quote }}
+  JOB_RUNS_CLEANUP_CRON: {{ .Values.config.cleanup.jobRuns.cron | quote }}
+  JOB_RUNS_CLEANUP_BATCH_SIZE: {{ .Values.config.cleanup.jobRuns.batchSize | quote }}
+  JOB_RUNS_CLEANUP_SAFETY_LIMIT: {{ .Values.config.cleanup.jobRuns.safetyLimit | quote }}
+  PLAYGROUND_CLEANUP_ENABLED: {{ .Values.config.cleanup.playground.enabled | quote }}
+  PLAYGROUND_CLEANUP_CRON: {{ .Values.config.cleanup.playground.cron | quote }}
+  PLAYGROUND_CLEANUP_MAX_AGE_HOURS: {{ .Values.config.cleanup.playground.maxAgeHours | quote }}
+  WEBHOOK_CLEANUP_ENABLED: {{ .Values.config.cleanup.webhook.enabled | quote }}
+  WEBHOOK_CLEANUP_CRON: {{ .Values.config.cleanup.webhook.cron | quote }}
+  WEBHOOK_CLEANUP_BATCH_SIZE: {{ .Values.config.cleanup.webhook.batchSize | quote }}
+  WEBHOOK_CLEANUP_SAFETY_LIMIT: {{ .Values.config.cleanup.webhook.safetyLimit | quote }}
+
+  # SMTP (non-sensitive)
+  SMTP_HOST: {{ .Values.config.smtp.host | quote }}
+  SMTP_PORT: {{ .Values.config.smtp.port | quote }}
+  SMTP_SECURE: {{ .Values.config.smtp.secure | quote }}
+  SMTP_FROM_EMAIL: {{ .Values.config.smtp.fromEmail | quote }}
+
+  # AI
+  AI_PROVIDER: {{ .Values.config.ai.provider | quote }}
+  AI_MODEL: {{ .Values.config.ai.model | quote }}
+  AI_TIMEOUT_MS: {{ .Values.config.ai.timeoutMs | quote }}
+  AI_MAX_RETRIES: {{ .Values.config.ai.maxRetries | quote }}
+  AI_TEMPERATURE: {{ .Values.config.ai.temperature | quote }}
+
+  # AI Provider (non-sensitive)
+  AZURE_API_VERSION: {{ .Values.config.aiKeys.azureApiVersion | quote }}
+  AZURE_USE_MANAGED_IDENTITY: {{ .Values.config.aiKeys.azureUseManagedIdentity | quote }}
+  GOOGLE_VERTEX_LOCATION: {{ .Values.config.aiKeys.googleVertexLocation | quote }}
+
+  # Queue Alerting
+  QUEUE_ALERTING_ENABLED: {{ .Values.config.queueAlerting.enabled | quote }}

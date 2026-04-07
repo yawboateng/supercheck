@@ -1,0 +1,51 @@
+# Supercheck - Remote Worker Deployment
+# Matches docker-compose-worker.yml
+#
+# Usage:
+#   helm install supercheck-worker ./deploy/kubernetes/supercheck -f values-worker.yaml
+#
+# Deploy on a separate cluster/node in a different geographic region
+# for multi-location monitoring and performance testing.
+
+# Disable everything except the worker
+app:
+  enabled: false
+
+postgres:
+  enabled: false
+
+redis:
+  enabled: false
+
+minio:
+  enabled: false
+
+istio:
+  enabled: false
+
+worker:
+  enabled: true
+  replicas: 1
+
+config:
+  # CHANGE: Worker location determines which regional queue this worker processes
+  workerLocation: us-east  # us-east | eu-central | asia-pacific
+
+  # CHANGE: Point to main Supercheck instance
+  database:
+    url: "postgresql://user:pass@main-server.example.com:5432/supercheck"
+    host: "main-server.example.com"
+    port: 5432
+    user: ""
+    password: ""
+    name: supercheck
+
+  redis:
+    host: "main-server.example.com"
+    port: 6379
+    password: ""
+
+  s3:
+    endpoint: "http://main-server.example.com:9000"
+    accessKeyId: ""
+    secretAccessKey: ""

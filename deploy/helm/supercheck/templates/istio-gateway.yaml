@@ -1,0 +1,35 @@
+{{- if and .Values.ingress.enabled (eq .Values.ingress.provider "istio") }}
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: {{ include "supercheck.fullname" . }}-gateway
+  labels:
+    {{- include "supercheck.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- toYaml .Values.ingress.istio.gatewaySelector | nindent 4 }}
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ .Values.ingress.hosts.app | quote }}
+        - {{ .Values.ingress.hosts.statusPages | quote }}
+      {{- if .Values.ingress.tls.enabled }}
+      tls:
+        httpsRedirect: true
+      {{- end }}
+    {{- if .Values.ingress.tls.enabled }}
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        - {{ .Values.ingress.hosts.app | quote }}
+        - {{ .Values.ingress.hosts.statusPages | quote }}
+      tls:
+        mode: {{ .Values.ingress.istio.tlsMode }}
+        credentialName: {{ .Values.ingress.tls.secretName }}
+    {{- end }}
+{{- end }}
